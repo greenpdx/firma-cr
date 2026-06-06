@@ -53,3 +53,25 @@ button:hover { filter: brightness(0.97); }
   min-height: 20px;
   margin-top: 10px;
 }
+
+/* ---- topbar + summary ---- */
+.topbar { display: flex; align-items: center; justify-content: space-between; }
+.summary { font-size: 13px; margin-bottom: 10px; line-height: 1.6; }
+
+/* ---- config dialog ---- */
+dialog#config-dialog {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0;
+  width: 460px;
+  max-width: 90vw;
+}
+dialog#config-dialog::backdrop { background: rgba(15, 23, 42, 0.35); }
+.config-form { padding: 18px; }
+.config-form h2 { margin: 0 0 12px; font-size: 17px; }
+.config-form fieldset { border: 1px solid var(--border); border-radius: 8px; margin: 0 0 12px; }
+.config-form legend { font-size: 12px; color: #64748b; padding: 0 6px; }
+label.inline { display: inline-flex; align-items: center; gap: 6px; margin-right: 14px; }
+.config-actions { display: flex; gap: 10px; justify-content: flex-end; padding: 0; margin: 14px 0 0; }
+.hint { font-size: 11px; color: #64748b; margin: 4px 0 0; }
+.warn { font-size: 12px; color: #b45309; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 8px; }

@@ -8,13 +8,16 @@
   </head>
   <body>
     <main>
-      <h1>Firma CR <small>· firmador (Phase 1: PAdES-B-B)</small></h1>
+      <header class="topbar">
+        <h1>Firma CR <small>· firmador (Phase 1: PAdES-B-B)</small></h1>
+        <button id="btn-config">⚙ Configuración</button>
+      </header>
 
       <section class="card">
-        <label>PKCS#11 module
-          <input id="module" type="text"
-                 placeholder="/usr/lib/firma-cr/libfirma_cr_pkcs11.so" />
-        </label>
+        <div class="summary">
+          <div>Método: <b id="sum-method">Smart card (PKCS#11)</b></div>
+          <div>Módulo / archivo: <span id="sum-source" class="path">—</span></div>
+        </div>
         <button id="btn-info">Read card</button>
         <pre id="info" class="out"></pre>
       </section>
@@ -28,17 +31,62 @@
           <button id="btn-pick-out">Output as…</button>
           <span id="out-path" class="path">—</span>
         </div>
-        <label>PIN
-          <input id="pin" type="password" autocomplete="off" />
-        </label>
         <div class="row">
           <label class="grow">Reason <input id="reason" type="text" placeholder="(optional)" /></label>
           <label class="grow">Location <input id="location" type="text" placeholder="(optional)" /></label>
         </div>
+        <label>PIN
+          <input id="pin" type="password" autocomplete="off"
+                 placeholder="entered per sign — never stored" />
+        </label>
         <button id="btn-sign" class="primary">Firmar PDF</button>
         <pre id="result" class="out"></pre>
       </section>
     </main>
+
+    <!-- Config dialog: library (PKCS#11), PKCS#12 (optional), password -->
+    <dialog id="config-dialog">
+      <form method="dialog" class="config-form">
+        <h2>Configuración</h2>
+
+        <fieldset>
+          <legend>Método de autenticación</legend>
+          <label class="inline"><input type="radio" name="method" value="pkcs11" checked /> Smart card (PKCS#11)</label>
+          <label class="inline"><input type="radio" name="method" value="pkcs12" /> Archivo PKCS#12 (.p12)</label>
+        </fieldset>
+
+        <div id="grp-pkcs11">
+          <label>Biblioteca PKCS#11 (.so)
+            <div class="row">
+              <input id="cfg-module" type="text"
+                     placeholder="/usr/lib/firma-cr/libfirma_cr_pkcs11.so" />
+              <button type="button" id="cfg-pick-module">…</button>
+            </div>
+          </label>
+        </div>
+
+        <div id="grp-pkcs12" hidden>
+          <label>Archivo PKCS#12 (.p12 / .pfx)
+            <div class="row">
+              <input id="cfg-p12" type="text" placeholder="/path/to/cert.p12" />
+              <button type="button" id="cfg-pick-p12">…</button>
+            </div>
+          </label>
+          <p class="warn">⚠ El backend aún no firma con PKCS#12 (firma-cr-pades no
+            tiene lector .p12). El campo se guarda; la firma devolverá «no
+            implementado» hasta integrarlo.</p>
+        </div>
+
+        <p class="hint">El PIN no se configura aquí: se pide al firmar y no se
+          guarda nunca.</p>
+
+        <menu class="config-actions">
+          <button type="button" id="cfg-save" class="primary">Guardar</button>
+          <button type="button" id="cfg-close">Cerrar</button>
+        </menu>
+      </form>
+    </dialog>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

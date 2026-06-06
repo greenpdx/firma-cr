@@ -53,21 +53,38 @@ fn card_info(module: Option<String>, slot: Option<usize>) -> Result<String, Stri
 }
 
 /// Sign `input_path` (a PDF) into `output_path` with a PAdES-B-B signature.
-/// `pin` unlocks the card; `reason`/`location` are optional signature metadata.
+///
+/// `method` selects the signer: `"pkcs11"` uses the card via the module;
+/// `"pkcs12"` is accepted by the UI but **not yet implemented** in the
+/// backend — `firma-cr-pades` has no PKCS#12 reader, so we return a clear
+/// error rather than pretend. `password` is the card PIN (or, once wired,
+/// the .p12 password). `reason`/`location` are optional signature metadata.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn sign_pdf(
+    method: String,
     module: Option<String>,
+    pkcs12_path: Option<String>,
     slot: Option<usize>,
     input_path: String,
     output_path: String,
-    pin: String,
+    password: String,
     reason: Option<String>,
     location: Option<String>,
 ) -> Result<String, String> {
+    if method == "pkcs12" || pkcs12_path.is_some() {
+        return Err(
+            "PKCS#12 signing is not implemented yet: firma-cr-pades has no .p12 \
+             backend (only the card/PKCS#11 path and a test-only PEM/DER signer). \
+             Use the Smart card (PKCS#11) method, or wire a p12 signer first."
+                .to_string(),
+        );
+    }
+
     let module = module_path(module);
 
     let mut client = CardClient::open(Path::new(&module), slot).map_err(|e| e.to_string())?;
-    client.login(&pin).map_err(|e| e.to_string())?;
+    client.login(&password).map_err(|e| e.to_string())?;
     let key = client.read_signing_key().map_err(|e| e.to_string())?;
     let cert = SignerCert::from_der(client.read_certificate().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
