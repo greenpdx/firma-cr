@@ -1,0 +1,22 @@
+{
+  "name": "firma-cr-tauri",
+  "version": "0.0.1",
+  "description": "Tauri GUI for firma-cr-pades (Phase 1: PAdES-B-B)",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "^5.6",
+    "vite": "^5.4"
+  }
+}

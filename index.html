@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Firma CR — firmador</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Firma CR <small>· firmador (Phase 1: PAdES-B-B)</small></h1>
+
+      <section class="card">
+        <label>PKCS#11 module
+          <input id="module" type="text"
+                 placeholder="/usr/lib/firma-cr/libfirma_cr_pkcs11.so" />
+        </label>
+        <button id="btn-info">Read card</button>
+        <pre id="info" class="out"></pre>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <button id="btn-pick-in">Choose PDF…</button>
+          <span id="in-path" class="path">no file selected</span>
+        </div>
+        <div class="row">
+          <button id="btn-pick-out">Output as…</button>
+          <span id="out-path" class="path">—</span>
+        </div>
+        <label>PIN
+          <input id="pin" type="password" autocomplete="off" />
+        </label>
+        <div class="row">
+          <label class="grow">Reason <input id="reason" type="text" placeholder="(optional)" /></label>
+          <label class="grow">Location <input id="location" type="text" placeholder="(optional)" /></label>
+        </div>
+        <button id="btn-sign" class="primary">Firmar PDF</button>
+        <pre id="result" class="out"></pre>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
