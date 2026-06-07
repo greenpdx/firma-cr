@@ -28,6 +28,13 @@
     "targets": "all",
     "icon": [
       "icons/icon.png"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "firma-cr-pkcs11"
+        ]
+      }
+    }
   }
 }
