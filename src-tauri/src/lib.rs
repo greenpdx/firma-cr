@@ -96,7 +96,30 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
-        .setup(move |_app| {
+        .setup(move |app| {
+            // System-tray presence (GAUDI-style background agent).
+            use tauri::menu::{Menu, MenuItem};
+            use tauri::tray::TrayIconBuilder;
+            use tauri::Manager;
+            let show = MenuItem::with_id(app, "show", "Abrir Firma CR", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            TrayIconBuilder::with_id("firma-cr")
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("Firma CR — agente en http://127.0.0.1:41231")
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
+
             // Embed the firma-cr-agent /dyn server (GAUDI's web-bridge role) on
             // 127.0.0.1:41231, sharing the same card session as the GUI commands.
             tauri::async_runtime::spawn(async move {
@@ -106,6 +129,13 @@ pub fn run() {
                 }
             });
             Ok(())
+        })
+        // Closing the window hides to tray; the agent keeps serving.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
         })
         .invoke_handler(tauri::generate_handler![card_info, sign_pdf])
         .run(tauri::generate_context!())
