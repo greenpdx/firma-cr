@@ -83,6 +83,14 @@ fn sign_pdf(
     ))
 }
 
+/// Quit the whole process (the embedded /dyn agent stops with it). Wired to the
+/// window's "Salir" button so there is always an in-window way to exit, not only
+/// the tray menu (which may be invisible on some desktops).
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // ONE shared card session for the whole process: the embedded /dyn agent
@@ -130,14 +138,10 @@ pub fn run() {
             });
             Ok(())
         })
-        // Closing the window hides to tray; the agent keeps serving.
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
-            }
-        })
-        .invoke_handler(tauri::generate_handler![card_info, sign_pdf])
+        // Closing the window quits the whole process (the embedded /dyn agent
+        // stops with it). The tray "Salir" item and the in-window "Salir" button
+        // both call quit_app for the same effect.
+        .invoke_handler(tauri::generate_handler![card_info, sign_pdf, quit_app])
         .run(tauri::generate_context!())
         .expect("error while running Firma CR tauri application");
 }

@@ -72,6 +72,9 @@ $("btn-config").addEventListener("click", () => {
   syncDialogFromCfg();
   dialog.showModal();
 });
+
+// Exit button: quits the whole process (stops the embedded /dyn agent too).
+$("btn-quit").addEventListener("click", () => { void invoke("quit_app"); });
 document.querySelectorAll('input[name="method"]').forEach((el) =>
   el.addEventListener("change", toggleMethodGroups),
 );
