@@ -127,13 +127,33 @@ $("btn-pick-out").addEventListener("click", async () => {
   if (sel) { outputPath = sel; $("out-path").textContent = sel; }
 });
 
-$("btn-sign").addEventListener("click", async () => {
+// PIN is entered in a popup dialog at sign time (GAUDI-style), never inline.
+const pinDialog = $<HTMLDialogElement>("pin-dialog");
+const pinInput = $<HTMLInputElement>("pin-input");
+
+$("btn-sign").addEventListener("click", () => {
   const res = $("result");
-  const pinEl = $<HTMLInputElement>("pin");
-  const pin = pinEl.value;
   if (!inputPath) { res.textContent = "Pick a PDF first."; return; }
   if (!outputPath) { res.textContent = "Pick an output path first."; return; }
-  if (!pin) { res.textContent = "Enter the PIN."; return; }
+  pinInput.value = "";
+  pinDialog.showModal();
+  pinInput.focus();
+});
+
+$("pin-cancel").addEventListener("click", () => {
+  pinInput.value = "";
+  pinDialog.close();
+});
+
+pinInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("pin-ok").click(); }
+});
+
+$("pin-ok").addEventListener("click", async () => {
+  const pin = pinInput.value;
+  if (!pin) { pinInput.focus(); return; }
+  pinDialog.close();
+  const res = $("result");
   res.textContent = "signing…";
   try {
     res.textContent = await invoke<string>("sign_pdf", {
@@ -150,7 +170,7 @@ $("btn-sign").addEventListener("click", async () => {
   } catch (e) {
     res.textContent = "ERROR: " + e;
   } finally {
-    pinEl.value = ""; // wipe the PIN right after use — never retained
+    pinInput.value = ""; // wipe the PIN right after use — never retained
   }
 });
 

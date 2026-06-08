@@ -35,10 +35,6 @@
           <label class="grow">Reason <input id="reason" type="text" placeholder="(optional)" /></label>
           <label class="grow">Location <input id="location" type="text" placeholder="(optional)" /></label>
         </div>
-        <label>PIN
-          <input id="pin" type="password" autocomplete="off"
-                 placeholder="entered per sign — never stored" />
-        </label>
         <button id="btn-sign" class="primary">Firmar PDF</button>
         <pre id="result" class="out"></pre>
       </section>
@@ -83,6 +79,20 @@
         <menu class="config-actions">
           <button type="button" id="cfg-save" class="primary">Guardar</button>
           <button type="button" id="cfg-close">Cerrar</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <!-- PIN prompt — pops at sign time (GAUDI-style); the PIN is never stored. -->
+    <dialog id="pin-dialog">
+      <form method="dialog">
+        <h2>Ingrese su PIN</h2>
+        <p class="hint">El PIN se usa solo para firmar y no se guarda.</p>
+        <input id="pin-input" type="password" inputmode="numeric" autocomplete="off"
+               placeholder="PIN de la tarjeta" />
+        <menu class="config-actions">
+          <button type="button" id="pin-ok" class="primary">Firmar</button>
+          <button type="button" id="pin-cancel">Cancelar</button>
         </menu>
       </form>
     </dialog>
