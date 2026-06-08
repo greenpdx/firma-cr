@@ -126,6 +126,24 @@ fn sign_pdf(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|_app| {
+            // Embed the firma-cr-agent /dyn server (GAUDI's web-bridge role) so
+            // this single app is the desktop signer AND the local browser bridge
+            // on 127.0.0.1:41231. It touches the card only lazily (on a /dyn
+            // request), so it does not clash with the direct card_info/sign_pdf
+            // commands at startup. (Next: unify the card session between the two.)
+            tauri::async_runtime::spawn(async {
+                let module = firma_cr_agent::token::default_module_path();
+                eprintln!(
+                    "firma-cr: /dyn agent on http://127.0.0.1:41231 (module {})",
+                    module.display()
+                );
+                if let Err(e) = firma_cr_agent::http::serve(module).await {
+                    eprintln!("firma-cr: agent server error: {e}");
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![card_info, sign_pdf])
         .run(tauri::generate_context!())
         .expect("error while running Firma CR tauri application");

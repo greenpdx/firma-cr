@@ -24,6 +24,10 @@ serde_json = "1"
 # whole point of Phase 1 — no PKCS#11 shim, no WASM; the Rust backend calls the
 # real CardClient + pades::sign_pdf over the system PKCS#11 module.
 firma-cr-pades = { path = "../.." }
+# Embed the /dyn web-signing agent (GAUDI's role) so this one app is both the
+# desktop signer and the local browser bridge. Path dep on the sibling repo
+# (clone digitalfirma next to firma-cr-pades).
+firma-cr-agent = { path = "../../../digitalfirma/firma-cr-agent" }
 
 [features]
 # Phase 1 ships PAdES-B-B only; the timestamp/LT profiles stay behind the lib's
