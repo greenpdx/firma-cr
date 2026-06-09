@@ -57,6 +57,42 @@ enum Cmd {
     /// Print module/library/token/cert info. No PIN required.
     Info,
 
+    /// List PKCS#11 slots that have a token present. No PIN.
+    List,
+
+    /// Dump the signing certificate — DER to stdout (or -o file), or --pem.
+    /// No PIN (the cert is public). Honours --cert-file.
+    Cert {
+        /// Emit PEM instead of raw DER.
+        #[arg(long)]
+        pem: bool,
+        /// Write to this file instead of stdout.
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Deep PC/SC card probe (no PKCS#11): walk the PKCS#15 layout and dump
+    /// it as JSON. Talks the reader directly — for inspecting a card or
+    /// capturing its structure offline.
+    Probe {
+        /// Reader index (default: first).
+        #[arg(long, default_value_t = 0)]
+        reader_index: usize,
+        /// Write the JSON report here; `-` for stdout.
+        #[arg(short = 'o', long, default_value = "probe.json")]
+        out: PathBuf,
+        /// Also do a SINGLE VERIFY PIN attempt, then re-probe authenticated.
+        /// Aborts on a wrong PIN — does NOT retry. Use only if you know it.
+        #[arg(long, value_name = "PIN")]
+        with_pin: Option<String>,
+        /// PIN reference byte for VERIFY (default: discovered from EF.AOD).
+        #[arg(long)]
+        pin_ref: Option<u8>,
+        /// PIN pad byte (default: from EF.AOD, else 0xFF). Decimal or 0x-hex.
+        #[arg(long, value_parser = parse_byte)]
+        pin_pad: Option<u8>,
+    },
+
     /// (Phase 2) CAdES-B-B detached CMS over an arbitrary file.
     Cms {
         #[arg(short = 'i', long)]
@@ -393,9 +429,15 @@ fn make_tsa_fn(
 }
 
 fn run(cli: Cli) -> firma_cr_core::Result<()> {
-    // Verify subcommands don't need card access — handle first.
-    if let Cmd::Verify(v) = &cli.cmd {
-        return run_verify(v);
+    // These don't open a PKCS#11 session: verify is offline, probe talks PC/SC
+    // directly, and list only enumerates slots — handle them first.
+    match &cli.cmd {
+        Cmd::Verify(v) => return run_verify(v),
+        Cmd::List => return cmd_list(&cli.module),
+        Cmd::Probe { reader_index, out, with_pin, pin_ref, pin_pad } => {
+            return cmd_probe(*reader_index, out, with_pin.as_deref(), *pin_ref, *pin_pad);
+        }
+        _ => {}
     }
 
     let mut client = CardClient::open(&cli.module, cli.slot)?;
@@ -407,6 +449,12 @@ fn run(cli: Cli) -> firma_cr_core::Result<()> {
             SignerCert::from_der(der)?
         }
     };
+
+    // A bare cert dump needs only the cert, not the issuer chain — return
+    // before the (network) AIA fetch below.
+    if let Cmd::Cert { pem, output } = &cli.cmd {
+        return cmd_cert(&cert, *pem, output.as_deref());
+    }
 
     let chain: Vec<SignerCert> = match &cli.include_chain {
         Some(path) => SignerCert::load_chain_from_pem(path)?,
@@ -434,7 +482,9 @@ fn run(cli: Cli) -> firma_cr_core::Result<()> {
     let chain_refs: Vec<&SignerCert> = chain.iter().collect();
 
     match cli.cmd {
-        Cmd::Verify(_) => unreachable!("handled above"),
+        Cmd::Verify(_) | Cmd::List | Cmd::Probe { .. } | Cmd::Cert { .. } => {
+            unreachable!("handled above")
+        }
         Cmd::Info => cmd_info(&client, &cert),
         Cmd::Cms { input, output, pin, opts } => {
             let algo = HashAlgo::parse(&opts.digest).ok_or_else(|| {
@@ -640,6 +690,90 @@ fn run_verify(cmd: &VerifyCmd) -> firma_cr_core::Result<()> {
             "verification failed (see verdict above)".into(),
         ))
     }
+}
+
+/// List the slots that currently have a token present (no PIN, no session).
+fn cmd_list(module: &std::path::Path) -> firma_cr_core::Result<()> {
+    let lines = firma_cr_card::pkcs11_client::list_tokens(module)?;
+    if lines.is_empty() {
+        println!("(no slots with a token present)");
+    } else {
+        for l in lines {
+            println!("{l}");
+        }
+    }
+    Ok(())
+}
+
+/// Dump the signing certificate (already resolved from the card or --cert-file).
+fn cmd_cert(cert: &SignerCert, pem: bool, output: Option<&std::path::Path>) -> firma_cr_core::Result<()> {
+    let bytes = if pem {
+        der_to_pem(&cert.der, "CERTIFICATE").into_bytes()
+    } else {
+        cert.der.clone()
+    };
+    write_out(output, &bytes)
+}
+
+/// Deep PC/SC card probe → JSON report. Bypasses PKCS#11 entirely.
+fn cmd_probe(
+    reader_index: usize,
+    out: &std::path::Path,
+    with_pin: Option<&str>,
+    pin_ref: Option<u8>,
+    pin_pad: Option<u8>,
+) -> firma_cr_core::Result<()> {
+    use firma_cr_card::probe::Prober;
+    let err = |e: anyhow::Error| firma_cr_core::Error::InvalidArg(e.to_string());
+    let mut p = Prober::connect(reader_index).map_err(err)?;
+    p.run_unauthenticated().map_err(err)?;
+    if let Some(pin) = with_pin {
+        p.run_with_pin(pin, pin_ref, pin_pad).map_err(err)?;
+    }
+    let report = p.finalize();
+    let json = serde_json::to_string_pretty(&report)
+        .map_err(|e| firma_cr_core::Error::InvalidArg(e.to_string()))?;
+    if out == std::path::Path::new("-") {
+        println!("{json}");
+    } else {
+        std::fs::write(out, json)?;
+        eprintln!("probe report written to {}", out.display());
+    }
+    Ok(())
+}
+
+/// Parse a u8 from decimal or `0x`-prefixed hex (clap value_parser).
+fn parse_byte(s: &str) -> Result<u8, String> {
+    let s = s.trim();
+    let (body, base) = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .map(|r| (r, 16))
+        .unwrap_or((s, 10));
+    u8::from_str_radix(body, base).map_err(|e| format!("invalid byte {s:?}: {e}"))
+}
+
+/// Wrap DER in a PEM armor with 64-char base64 lines.
+fn der_to_pem(der: &[u8], label: &str) -> String {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut out = format!("-----BEGIN {label}-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(chunk).unwrap());
+        out.push('\n');
+    }
+    out.push_str(&format!("-----END {label}-----\n"));
+    out
+}
+
+/// Write bytes to a file, or to stdout when no path is given.
+fn write_out(path: Option<&std::path::Path>, bytes: &[u8]) -> firma_cr_core::Result<()> {
+    use std::io::Write;
+    match path {
+        Some(p) => std::fs::write(p, bytes)?,
+        None => std::io::stdout().write_all(bytes)?,
+    }
+    Ok(())
 }
 
 fn cmd_info(client: &CardClient, cert: &SignerCert) -> firma_cr_core::Result<()> {
