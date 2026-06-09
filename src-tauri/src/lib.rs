@@ -1,12 +1,12 @@
 //! Tauri backend for Firma CR — the all-in-one GAUDI + Firmador replacement.
 //!
-//! On launch it embeds the `firma-cr-agent` `/dyn` web-signing server (GAUDI's
+//! On launch it embeds the firma-cr-pades `agent` `/dyn` web-signing server (GAUDI's
 //! browser-bridge role) on `127.0.0.1:41231`, and exposes two GUI commands:
 //!
 //!   * `card_info` — token + signing-certificate info (no PIN).
 //!   * `sign_pdf`  — PAdES-B-B sign a PDF with the card.
 //!
-//! The agent and both commands share ONE card session (`firma_cr_agent`
+//! The agent and both commands share ONE card session (`firma_cr_pades::agent`
 //! `AppState` behind `Arc<Mutex<…>>`), because crfirma's `C_Initialize` is a
 //! process-global singleton — there must be exactly one `CardClient` per
 //! process. The card is reached through the system PKCS#11 module
@@ -14,7 +14,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use firma_cr_agent::http::{AppState, Shared};
+use firma_cr_pades::agent::http::{AppState, Shared};
 use tauri::State;
 
 /// Report token + signing-certificate details. No PIN required — the "is the
@@ -96,7 +96,7 @@ pub fn run() {
     // ONE shared card session for the whole process: the embedded /dyn agent
     // AND the GUI commands use it. crfirma's C_Initialize is a process-global
     // singleton, so there must be exactly one CardClient per process.
-    let module = firma_cr_agent::token::default_module_path();
+    let module = firma_cr_pades::agent::token::default_module_path();
     eprintln!("firma-cr: crfirma module = {}", module.display());
     let state: Shared = Arc::new(Mutex::new(AppState::new(module)));
     let agent_state = state.clone();
@@ -128,11 +128,11 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Embed the firma-cr-agent /dyn server (GAUDI's web-bridge role) on
+            // Embed the firma-cr-pades agent /dyn server (GAUDI's web-bridge role) on
             // 127.0.0.1:41231, sharing the same card session as the GUI commands.
             tauri::async_runtime::spawn(async move {
                 eprintln!("firma-cr: /dyn agent on http://127.0.0.1:41231");
-                if let Err(e) = firma_cr_agent::http::serve_with_state(agent_state).await {
+                if let Err(e) = firma_cr_pades::agent::http::serve_with_state(agent_state).await {
                     eprintln!("firma-cr: agent server error: {e}");
                 }
             });
