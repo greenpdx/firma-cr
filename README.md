@@ -10,4 +10,4 @@ module (the official Idopte driver, OpenSC, …).
 - **firma-cr-card** — PKCS#11 client: load any driver, card info, login, read
   cert, sign, PKCS#15 discovery (`probe` feature).
 
-Desktop GUI: the **firma-cr-gui** repo. License: GPL-3.0-or-later.
+Desktop GUI: **gui/** (Tauri). License: GPL-3.0-or-later.

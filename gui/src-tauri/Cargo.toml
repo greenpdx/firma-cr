@@ -26,10 +26,10 @@ serde_json = "1"
 # app is both the desktop signer and the local browser bridge — the agent is a
 # feature of firma-cr-core, no separate crate.
 #
-# Path dep on the OPEN firma-cr repo, expected as a sibling checkout
-# (`~/firma-cr` next to `~/firma-cr-gui`). For a standalone open build this
-# becomes a git/published dependency.
-firma-cr-core = { path = "../../firma-cr/crates/firma-cr-core", features = ["agent"] }
+# In-repo dependency: the GUI lives at firma-cr/gui, the core at
+# firma-cr/crates/firma-cr-core. Excluded from the cargo workspace (it carries
+# the tauri/node/webkit toolchain) — built separately via `tauri build`.
+firma-cr-core = { path = "../../crates/firma-cr-core", features = ["agent"] }
 
 [features]
 # Phase 1 ships PAdES-B-B only; the timestamp/LT profiles stay behind the lib's

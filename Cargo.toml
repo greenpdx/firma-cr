@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/firma-cr-core", "crates/firma-cr-card"]
+# The Tauri GUI (gui/) is built separately (`cd gui && npm install && tauri
+# build`); keep its node/webkit toolchain out of the cargo workspace.
+exclude = ["gui/src-tauri"]
 
 [profile.release]
 strip = false
