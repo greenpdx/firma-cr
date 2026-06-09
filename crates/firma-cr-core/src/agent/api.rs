@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Typed request/response contracts for the `/dyn` endpoints (DESIGN.md,
 //! reports/29). Requests are parsed from the query params ([`DynRequest`]);
 //! responses serialize to JSON.

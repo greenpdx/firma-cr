@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The local `/dyn` HTTP server (axum 0.8) on `127.0.0.1:41231` — the
 //! GAUDI-compatible surface that BCCR websites call (DESIGN.md, reports/29).
 //! Wires the pure modules (`session`, `api`, `dyn_request`) and the card modules

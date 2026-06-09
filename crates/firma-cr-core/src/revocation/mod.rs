@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! OCSP / CRL / AIA — revocation data acquisition for ETSI -LT
 //! profiles.
 //!

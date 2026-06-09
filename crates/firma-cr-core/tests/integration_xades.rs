@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! XAdES integration test — sign the fixture XML, optionally verify
 //! with `xmlsec1` when installed.
 //!

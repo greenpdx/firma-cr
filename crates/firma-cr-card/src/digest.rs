@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Hash-algorithm registry + dispatch helper.
 //!
 //! Centralises the algo-name ↔ OID ↔ XMLDSig-URI ↔ digest-impl

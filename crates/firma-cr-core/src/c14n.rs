@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Exclusive XML Canonicalization 1.0 (RFC 3741 / W3C
 //! xml-exc-c14n#).
 //!

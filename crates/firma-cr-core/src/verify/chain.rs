@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Certificate chain validation.
 //!
 //! Given a leaf cert + a set of intermediate certs found in the

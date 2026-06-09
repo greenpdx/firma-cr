@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Verify embedded -LT revocation values.
 //!
 //! Given the bytes carried by the `id-aa-ets-revocationValues`

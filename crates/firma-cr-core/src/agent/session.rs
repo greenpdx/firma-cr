@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Per-browser-session "env" state (DESIGN.md, reports/29).
 //!
 //! On `create_env` the agent mints a fresh RSA keypair and hands the web app

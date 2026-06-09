@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! PAdES PDF signature verification.
 //!
 //! Locates the `/Type /Sig` dict in the PDF, extracts `/ByteRange`

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Error type for the card-access layer. Deliberately small — only the
 //! failure modes the PKCS#11 client surfaces. The signer libraries wrap
 //! these into their own crate-wide error via `From`.

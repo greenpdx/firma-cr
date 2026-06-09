@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! RFC 3161 TimeStampToken verification.
 //!
 //! A TimeStampToken is itself a CMS `SignedData` whose

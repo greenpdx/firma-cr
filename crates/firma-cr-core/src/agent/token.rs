@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The `/dyn` "token" verbs (connect / login / get_certs / sign) mapped onto
 //! firma-cr-core's `CardClient` — the agent's binding to the card via crfirma
 //! (PKCS#11). Integration-tested against the card simulator (no hardware).

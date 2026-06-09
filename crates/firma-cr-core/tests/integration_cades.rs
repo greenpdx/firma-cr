@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! CAdES integration test — drive CadesBuilder end-to-end with a
 //! software signer + the test CA, verify the produced .p7s with
 //! `openssl cms`.

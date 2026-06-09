@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Deep card probe. Talks PC/SC directly (no PKCS#11 indirection) to pull
 //! every byte we can read off a BCCR card without risking PIN lockout.
 //! Output is a JSON report suitable for replay / offline analysis.

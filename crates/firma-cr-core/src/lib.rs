@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! firma-cr-core — ETSI digital signature library + CLI.
 //!
 //! Three signature families are produced, all driven from the same

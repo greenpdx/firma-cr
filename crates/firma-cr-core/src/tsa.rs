@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! RFC 3161 Time-Stamp Protocol client.
 //!
 //! Builds a `TimeStampReq` DER over the hash of arbitrary bytes

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! CAdES-B-B detached CMS signing.
 //!
 //! Builds a `SignedData` (RFC 5652) with the four signed attributes

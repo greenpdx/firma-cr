@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! RFC 6960 OCSP request building + response parsing.
 //!
 //! We wrap `x509-ocsp 0.2` (RustCrypto). Public surface:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Parse an incoming `/dyn/<action>?<query>` request into its action, env, and
 //! params. Pure (no I/O, no card) — the executable contract for the agent's
 //! routing layer. Protocol per firma-cr-analysis/reports/29:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The cryptoshell file pipeline (DESIGN.md, reports/29 §5):
 //! `cryptoshell_add_file` stores an uploaded document per env;
 //! `cryptoshell_build type=SIGN` PAdES-signs each one via the [`TokenSession`]

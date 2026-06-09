@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! PAdES integration test — sign the fixture PDF, verify with
 //! `pdfsig` (poppler-utils) when installed. Skips gracefully on
 //! hosts without pdfsig.

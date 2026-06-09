@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! firma-cr-agent binary — runs the local `/dyn` HTTP server (the Pi-native
 //! GAUDI replacement). The crfirma PKCS#11 module path comes from
 //! `CRFIRMA_MODULE` or the default (see `token::default_module_path`).

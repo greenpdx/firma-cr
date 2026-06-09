@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Thin façade over the `cryptoki` crate. Loads any PKCS#11 module
 //! by path (typically our own `libfirma_cr_pkcs11.so` but any
 //! conformant module works), opens a session against a token, exposes

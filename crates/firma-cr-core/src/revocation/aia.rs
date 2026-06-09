@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! AuthorityInfoAccess + CRLDistributionPoints extension parsing.
 //!
 //! RFC 5280 §4.2.2.1 (AIA, OID 1.3.6.1.5.5.7.1.1) lists per-purpose

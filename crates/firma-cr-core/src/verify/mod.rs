@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Signature verification — inverse of the signer chain.
 //!
 //! Three families, each parses the signed envelope, recomputes the

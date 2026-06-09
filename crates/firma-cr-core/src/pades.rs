@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! PAdES-B-B signing.
 //!
 //! Embeds a CAdES detached CMS into a PDF's signature dictionary

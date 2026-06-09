@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Crate-level error type. Wraps every failure mode (PKCS#11, CMS
 //! construction, PDF parsing, XML signing, network) into one enum so
 //! `Result<T, Error>` propagates cleanly. Where the upstream crate

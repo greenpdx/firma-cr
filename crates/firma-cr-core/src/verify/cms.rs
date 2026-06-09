@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! CAdES / CMS verification — detached signatures.
 //!
 //! Inverse of `crate::cades`.

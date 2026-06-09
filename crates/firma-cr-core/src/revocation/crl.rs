@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! CRL (RFC 5280 §5) parsing — uses `x509_cert::crl::CertificateList`
 //! and only adds two helpers we actually need: a serial-number lookup
 //! and an updated-window check.

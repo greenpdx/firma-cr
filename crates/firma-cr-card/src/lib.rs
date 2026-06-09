@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! firma-cr-card — shared PKCS#11 card-access layer for the Costa Rica
 //! BCCR Firma Digital stack.
 //!

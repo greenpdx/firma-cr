@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! XAdES-B-B signing (XMLDSig + ETSI EN 319 132-1).
 //!
 //! Three modes per the spec — enveloped (Signature element nested

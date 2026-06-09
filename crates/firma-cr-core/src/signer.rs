@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `Signer` trait — abstracts the RSA-PKCS#1-v1.5 over-DigestInfo
 //! operation so the builders don't hard-couple to PKCS#11.
 //!

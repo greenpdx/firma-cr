@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! firma-cr-agent — Pi-native (aarch64) BCCR GAUDI web-signing agent.
 //! Local `/dyn/<action>` HTTP API backed by the clean-room PKCS#11 driver
 //! (loaded as a .so) and the PAdES/CMS/XAdES signer in this crate.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Phase 9 round-trip — sign with our crate, verify with our crate.
 //!
 //! Covers all three families (CAdES, PAdES, XAdES) plus the negative

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Signer-certificate handling.
 //!
 //! A `SignerCert` holds the DER bytes plus the parsed `x509-cert`

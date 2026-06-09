@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! firma-cr-core — CLI entry point.
 //!
 //! Three signing modes (cms / pdf / xml) plus a diagnostic `info`
