@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Firma CR — firmador</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header class="topbar">
+        <h1>Firma CR <small>· firmador (Phase 1: PAdES-B-B)</small></h1>
+        <button id="btn-config">⚙ Configuración</button>
+        <button id="btn-quit" title="Salir de Firma CR">Salir</button>
+      </header>
+
+      <section class="card">
+        <div class="summary">
+          <div>Método: <b id="sum-method">Smart card (PKCS#11)</b></div>
+          <div>Módulo / archivo: <span id="sum-source" class="path">—</span></div>
+        </div>
+        <button id="btn-info">Read card</button>
+        <pre id="info" class="out"></pre>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <button id="btn-pick-in">Choose PDF…</button>
+          <span id="in-path" class="path">no file selected</span>
+        </div>
+        <div class="row">
+          <button id="btn-pick-out">Output as…</button>
+          <span id="out-path" class="path">—</span>
+        </div>
+        <div class="row">
+          <label class="grow">Reason <input id="reason" type="text" placeholder="(optional)" /></label>
+          <label class="grow">Location <input id="location" type="text" placeholder="(optional)" /></label>
+        </div>
+        <button id="btn-sign" class="primary">Firmar PDF</button>
+        <pre id="result" class="out"></pre>
+      </section>
+    </main>
+
+    <!-- Config dialog: library (PKCS#11), PKCS#12 (optional), password -->
+    <dialog id="config-dialog">
+      <form method="dialog" class="config-form">
+        <h2>Configuración</h2>
+
+        <fieldset>
+          <legend>Método de autenticación</legend>
+          <label class="inline"><input type="radio" name="method" value="pkcs11" checked /> Smart card (PKCS#11)</label>
+          <label class="inline"><input type="radio" name="method" value="pkcs12" /> Archivo PKCS#12 (.p12)</label>
+        </fieldset>
+
+        <div id="grp-pkcs11">
+          <label>Biblioteca PKCS#11 (.so)
+            <div class="row">
+              <input id="cfg-module" type="text"
+                     placeholder="/usr/lib/firma-cr/libfirma_cr_pkcs11.so" />
+              <button type="button" id="cfg-pick-module">…</button>
+            </div>
+          </label>
+        </div>
+
+        <div id="grp-pkcs12" hidden>
+          <label>Archivo PKCS#12 (.p12 / .pfx)
+            <div class="row">
+              <input id="cfg-p12" type="text" placeholder="/path/to/cert.p12" />
+              <button type="button" id="cfg-pick-p12">…</button>
+            </div>
+          </label>
+          <p class="warn">⚠ El backend aún no firma con PKCS#12 (firma-cr-pades no
+            tiene lector .p12). El campo se guarda; la firma devolverá «no
+            implementado» hasta integrarlo.</p>
+        </div>
+
+        <p class="hint">El PIN no se configura aquí: se pide al firmar y no se
+          guarda nunca.</p>
+
+        <menu class="config-actions">
+          <button type="button" id="cfg-save" class="primary">Guardar</button>
+          <button type="button" id="cfg-close">Cerrar</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <!-- PIN prompt — pops at sign time (GAUDI-style); the PIN is never stored. -->
+    <dialog id="pin-dialog">
+      <form method="dialog">
+        <h2>Ingrese su PIN</h2>
+        <p class="hint">El PIN se usa solo para firmar y no se guarda.</p>
+        <input id="pin-input" type="password" inputmode="numeric" autocomplete="off"
+               placeholder="PIN de la tarjeta" />
+        <menu class="config-actions">
+          <button type="button" id="pin-ok" class="primary">Firmar</button>
+          <button type="button" id="pin-cancel">Cancelar</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

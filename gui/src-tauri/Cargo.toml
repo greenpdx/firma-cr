@@ -1,0 +1,37 @@
+[package]
+name = "firma-cr-tauri"
+version = "0.0.1"
+edition = "2021"
+authors = ["Shaun Savage <savages@crmep.com>"]
+description = "Tauri GUI front-end for firma-cr-pades (Phase 1: PAdES-B-B PDF signing via the BCCR card)"
+license = "GPL-3.0-or-later"
+
+[lib]
+# Tauri v2: the app lives in a lib (`run()`); main.rs just calls it. cdylib is
+# required for the mobile targets, the rest for desktop.
+name = "firma_cr_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The native backend: reuse the document-signing library directly. The Rust
+# backend calls the real CardClient + sign_pdf over the system PKCS#11 module.
+# The `agent` feature pulls in the embedded /dyn web-signing server so this one
+# app is both the desktop signer and the local browser bridge — the agent is a
+# feature of firma-cr-core, no separate crate.
+#
+# Path dep on the OPEN firma-cr repo, expected as a sibling checkout
+# (`~/firma-cr` next to `~/firma-cr-gui`). For a standalone open build this
+# becomes a git/published dependency.
+firma-cr-core = { path = "../../firma-cr/crates/firma-cr-core", features = ["agent"] }
+
+[features]
+# Phase 1 ships PAdES-B-B only; the timestamp/LT profiles stay behind the lib's
+# own scaffolds until a TSA endpoint is wired.
+default = []
