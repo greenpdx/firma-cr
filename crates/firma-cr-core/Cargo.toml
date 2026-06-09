@@ -1,0 +1,72 @@
+[package]
+name = "firma-cr-core"
+version = "0.1.0"
+edition = "2024"
+authors = ["Shaun Savage <savages@crmep.com>"]
+description = "Core ETSI digital-signature library (PAdES + CAdES + XAdES + verify) + local /dyn agent — Costa Rica BCCR Firma Digital / Firmador replacement"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "firma-cr"
+path = "src/bin/firma-cr.rs"
+
+[[bin]]
+name = "firma-cr-agent"
+path = "src/bin/firma-cr-agent.rs"
+required-features = ["agent"]
+
+[lib]
+name = "firma_cr_core"
+path = "src/lib.rs"
+
+[dependencies]
+firma-cr-card = { path = "../firma-cr-card" }
+anyhow = "1.0.102"
+base64 = "0.22.1"
+clap = { version = "4.6.1", features = ["derive", "env"] }
+cms = "0.2.3"
+const-oid = { version = "0.10.2", features = ["db"] }
+cryptoki = "0.12.0"
+der = "0.7"
+env_logger = "0.11.10"
+hex = "0.4.3"
+log = "0.4.30"
+lopdf = "0.40.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }
+rpassword = "7.5.4"
+rsa = { version = "0.9.10", features = ["sha2"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha1 = { version = "0.10", features = ["oid"] }
+sha2 = "0.11.0"
+spki = "0.7"
+thiserror = "2.0.18"
+url = "2.5.8"
+x509-cert = { version = "0.2.5", features = ["pem", "builder"] }
+x509-ocsp = { version = "0.2.1", features = ["builder"] }
+xml-rs = "1.0.0"
+
+# --- agent feature (optional): the local /dyn web-signing server. ---
+# rsa, sha2, base64, serde and serde_json are already non-optional deps above,
+# so the agent code reuses them (note: the agent uses `rsa::sha2::Sha256` for
+# OAEP, not top-level sha2 0.11).
+axum       = { version = "0.8", optional = true }
+tokio      = { version = "1", features = ["rt-multi-thread", "macros", "net"], optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
+zeroize    = { version = "1", optional = true }
+rand       = { version = "0.8", optional = true }
+
+[dev-dependencies]
+rand = "0.8"
+serde_json = "1.0.150"
+tempfile = "3.27.0"
+# Drives the axum Router via `oneshot` in the agent e2e test.
+tower = { version = "0.5", features = ["util"] }
+
+[features]
+default = []
+test-signer = []
+agent = [
+    "dep:axum", "dep:tokio", "dep:tower-http",
+    "dep:zeroize", "dep:rand",
+]

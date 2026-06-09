@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/firma-cr-core", "crates/firma-cr-card"]
+
+[profile.release]
+strip = false
+lto = "thin"
