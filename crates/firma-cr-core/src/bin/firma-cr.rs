@@ -274,9 +274,6 @@ struct SignOpts {
     /// Hash algorithm for the signature (sha256 | sha384 | sha512).
     #[arg(long, default_value = "sha256")]
     digest: String,
-    /// Include intermediate cert chain in the signature certificates.
-    #[arg(long)]
-    include_chain: bool,
     /// Profile depth: B (baseline) | T (+timestamp) | LT (+revocation)
     /// | LTA (+archive timestamp).
     #[arg(long, default_value = "B")]
