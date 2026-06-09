@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Tauri backend for Firma CR — the all-in-one GAUDI + Firmador replacement.
 //!
 //! On launch it embeds the firma-cr-core `agent` `/dyn` web-signing server (GAUDI's
