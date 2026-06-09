@@ -21,15 +21,15 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The native backend: reuse the document-signing library directly. The Rust
-# backend calls the real CardClient + pades::sign_pdf over the system PKCS#11
-# module. The `agent` feature pulls in the embedded /dyn web-signing server
-# (GAUDI's role) so this one app is both the desktop signer and the browser
-# bridge — the agent was folded into firma-cr-pades, no separate crate.
+# backend calls the real CardClient + sign_pdf over the system PKCS#11 module.
+# The `agent` feature pulls in the embedded /dyn web-signing server so this one
+# app is both the desktop signer and the local browser bridge — the agent is a
+# feature of firma-cr-core, no separate crate.
 #
-# Path dep on the closed firma-cr workspace, expected as a sibling checkout
+# Path dep on the OPEN firma-cr repo, expected as a sibling checkout
 # (`~/firma-cr` next to `~/firma-cr-gui`). For a standalone open build this
 # becomes a git/published dependency.
-firma-cr-pades = { path = "../../firma-cr/crates/firma-cr-pades", features = ["agent"] }
+firma-cr-core = { path = "../../firma-cr/crates/firma-cr-core", features = ["agent"] }
 
 [features]
 # Phase 1 ships PAdES-B-B only; the timestamp/LT profiles stay behind the lib's

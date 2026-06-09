@@ -1186,7 +1186,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "firma-cr-pades"
+name = "firma-cr-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1225,7 +1225,7 @@ dependencies = [
 name = "firma-cr-tauri"
 version = "0.0.1"
 dependencies = [
- "firma-cr-pades",
+ "firma-cr-core",
  "serde",
  "serde_json",
  "tauri",
