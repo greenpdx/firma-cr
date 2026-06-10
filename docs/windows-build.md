@@ -71,7 +71,8 @@ cargo xwin build --release --target x86_64-pc-windows-msvc \
 ### Verified (cross-built on Linux, rustc 1.96)
 
 - `firma_cr_pkcs11.dll` — **~1.98 MB**, links `winscard.lib`, no portability
-  errors.
+  errors. Includes the reader-robustness fix (§7.1): resets the card on
+  connect/disconnect so a client that dies mid-transaction can't wedge the reader.
 - `firma-cr-agent.exe`, `firma-cr.exe` — build completed (exit 0).
 
 Cross-building only proves it **compiles and links**. The Chip-Auth + SM + PSO
@@ -135,7 +136,12 @@ a separate task — **out of scope here**.
    sequence; the card must be held (`SCardBeginTransaction` / appropriate share
    mode) or another process can grab the reader mid-flow. WinSCard semantics
    differ subtly from pcsclite — verify connect/transaction behaviour on a real
-   reader.
+   reader. **Mitigated in the driver:** it now resets the card on connect
+   (`SCardReconnect`, `ResetCard`) and on disconnect, so it never inherits a
+   half-finished exchange from a client that died mid-transaction. On Linux this
+   turned a reproduced 75 s wedge (instrumented: per-APDU stalls of 5–24 s, bytes
+   intact) into a 2 s self-healed recovery with no daemon restart — confirm the
+   same holds on WinSCard.
 2. **Coexistence with the official Idopte / SCManager.** A user's Windows box
    likely already has BCCR middleware that may own the reader, register a rival
    PKCS#11, and **also listen on `:41231`**. Expect contention; plan stop/replace
