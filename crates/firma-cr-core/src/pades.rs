@@ -49,17 +49,20 @@ const CMS_HEX_CHARS: usize = CMS_BINARY_BYTES * 2; // 16384
 /// substitutes in-place without changing byte offsets.
 const BYTERANGE_PLACEHOLDER: i64 = 1_000_000_000;
 
-/// Optional visible-appearance request for the signature widget.
+/// Optional visible signature stamp, drawn directly into the page
+/// content (not a widget appearance) so every PDF viewer renders it —
+/// notably Firefox's pdf.js, which skips signature-widget appearances.
 ///
 /// `rect` is `(llx, lly, urx, ury)` in PDF default-user-space points
-/// (1/72 inch). `page` is 1-based; if it doesn't exist, the
-/// appearance is added to page 1.
+/// (1/72 inch), origin bottom-left. `page` is 1-based; if it doesn't
+/// exist, the stamp is drawn on page 1.
 #[derive(Clone, Debug)]
 pub struct VisibleAppearance {
     pub rect: (f32, f32, f32, f32),
     pub page: usize,
-    /// Text rendered inside the box. Phase 8f hard-codes "TEST"; a
-    /// fast-follow lets the caller pass signer-name + date.
+    /// Font size in points. `None` auto-fits to the box height.
+    pub font_size: Option<f32>,
+    /// Text rendered inside the box; '\n' splits lines.
     pub label: String,
 }
 
@@ -122,104 +125,30 @@ pub fn sign_pdf(
     let sig_obj_id = doc.add_object(Object::Dictionary(sig_dict));
 
     // ---------- signature widget / form field ----------
+    // The widget itself is always invisible; a visible stamp (if requested) is
+    // drawn directly into the page content below, so EVERY viewer renders it
+    // (Firefox's pdf.js skips signature-widget appearances).
     let mut field = Dictionary::new();
     field.set("FT", Object::Name(b"Sig".to_vec()));
     field.set("Type", Object::Name(b"Annot".to_vec()));
     field.set("Subtype", Object::Name(b"Widget".to_vec()));
     field.set("T", Object::string_literal("Signature1"));
-
-    let visible_page_id = if let Some(v) = &visible {
-        let (llx, lly, urx, ury) = v.rect;
-        let w = (urx - llx).max(1.0);
-        let h = (ury - lly).max(1.0);
-        field.set(
-            "Rect",
-            Object::Array(vec![
-                Object::Real(llx),
-                Object::Real(lly),
-                Object::Real(urx),
-                Object::Real(ury),
-            ]),
-        );
-        field.set("F", Object::Integer(4)); // print flag only (visible)
-
-        // Build appearance Form XObject:
-        //  q 0 0 0 RG 1 w 0 0 w h re S
-        //  BT /F1 (h/2) Tf 2 (h/3) Td (label) Tj ET Q
-        let font_size = (h * 0.4).max(8.0);
-        let stream = format!(
-            "q\n0 0 0 RG\n1 w\n0 0 {w} {h} re\nS\nBT\n/F1 {fs} Tf\n2 {ty} Td\n({label}) Tj\nET\nQ\n",
-            w = w,
-            h = h,
-            fs = font_size,
-            ty = (h - font_size) / 2.0,
-            label = v.label,
-        );
-        let font_id = doc.add_object(lopdf::dictionary! {
-            "Type" => "Font",
-            "Subtype" => "Type1",
-            "BaseFont" => "Helvetica",
-        });
-        let resources = lopdf::dictionary! {
-            "Font" => lopdf::dictionary! { "F1" => font_id },
-        };
-        let xobj = doc.add_object(lopdf::Stream::new(
-            lopdf::dictionary! {
-                "Type" => "XObject",
-                "Subtype" => "Form",
-                "BBox" => vec![
-                    Object::Real(0.0),
-                    Object::Real(0.0),
-                    Object::Real(w),
-                    Object::Real(h),
-                ],
-                "Resources" => resources,
-            },
-            stream.into_bytes(),
-        ));
-        let ap = lopdf::dictionary! { "N" => xobj };
-        field.set("AP", Object::Dictionary(ap));
-
-        Some(v.page)
-    } else {
-        field.set(
-            "Rect",
-            Object::Array(vec![
-                Object::Integer(0),
-                Object::Integer(0),
-                Object::Integer(0),
-                Object::Integer(0),
-            ]),
-        );
-        field.set("F", Object::Integer(132)); // hidden + locked
-        None
-    };
-
+    field.set(
+        "Rect",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(0),
+        ]),
+    );
+    field.set("F", Object::Integer(132)); // hidden + locked
     field.set("V", Object::Reference(sig_obj_id));
     let field_id = doc.add_object(Object::Dictionary(field));
 
-    // Add the widget to the requested page's /Annots so PDF
-    // viewers actually render it. If we can't locate the page,
-    // the appearance just won't render — the cryptographic
-    // signature is still valid.
-    if let Some(page_num) = visible_page_id {
-        if let Some(page_id) = nth_page_id(&doc, page_num) {
-            if let Ok(page) = doc.get_object_mut(page_id).and_then(|o| o.as_dict_mut()) {
-                let annots = page.get_mut(b"Annots").ok().and_then(|o| match o {
-                    Object::Array(a) => Some(a),
-                    _ => None,
-                });
-                match annots {
-                    Some(arr) => arr.push(Object::Reference(field_id)),
-                    None => {
-                        page.set(
-                            "Annots",
-                            Object::Array(vec![Object::Reference(field_id)]),
-                        );
-                    }
-                }
-            }
-        }
+    // Draw the visible stamp into the page content (covered by the signature).
+    if let Some(v) = &visible {
+        let _ = draw_stamp_on_page(&mut doc, v);
     }
 
     // ---------- AcroForm on Catalog ----------
@@ -380,6 +309,115 @@ pub fn sign_pdf(
         .copy_from_slice(hex_cms.as_bytes());
 
     Ok(patched)
+}
+
+/// Draw the visible signature stamp (border box + multi-line label) directly
+/// into a page's content stream so every viewer renders it. Best-effort: a
+/// failure leaves the cryptographic signature intact, just without the visual.
+/// Must run BEFORE serialization so the drawing is covered by the signature.
+fn draw_stamp_on_page(doc: &mut Document, v: &VisibleAppearance) -> Option<()> {
+    let page_id = nth_page_id(doc, v.page).or_else(|| nth_page_id(doc, 1))?;
+    let (llx, lly, urx, ury) = v.rect;
+    let w = (urx - llx).max(1.0);
+    let h = (ury - lly).max(1.0);
+    let lines: Vec<&str> = v.label.split('\n').collect();
+    let fs = v
+        .font_size
+        .unwrap_or_else(|| (h / (lines.len() as f32 + 1.0)).clamp(6.0, 11.0));
+    let leading = fs * 1.2;
+
+    // Helvetica font registered in the page resources under a private name.
+    let font_id = doc.add_object(lopdf::dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+    });
+    add_font_to_page(doc, page_id, b"FirmaCRStamp", font_id)?;
+
+    // Content stream in page coordinate space (origin bottom-left).
+    let mut c = String::from("q\n0 0 0 RG\n0.5 w\n");
+    c.push_str(&format!("{llx} {lly} {w} {h} re\nS\n"));
+    c.push_str("BT\n");
+    c.push_str(&format!("/FirmaCRStamp {fs} Tf\n{leading} TL\n"));
+    c.push_str(&format!("{x} {y} Td\n", x = llx + 4.0, y = ury - fs - 3.0));
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            c.push_str("T*\n");
+        }
+        c.push('(');
+        c.push_str(&pdf_escape_literal(line));
+        c.push_str(") Tj\n");
+    }
+    c.push_str("ET\nQ\n");
+
+    // Wrap the page's existing content in q/Q and draw the stamp AFTER the Q, so
+    // it renders at the page's DEFAULT coordinate system — immune to any
+    // transform the page content leaves in effect. WeasyPrint (and others) emit
+    // a top-left Y-flip `cm` without restoring it, which would otherwise draw
+    // the stamp upside-down and mirrored in Y (spec-conformant viewers like
+    // pdf.js honour the leftover CTM; poppler happens to be lenient).
+    let save_id = doc.add_object(lopdf::Stream::new(Dictionary::new(), b"q\n".to_vec()));
+    let mut stamp_bytes = b"\nQ\n".to_vec(); // leading newline = token separator
+    stamp_bytes.extend_from_slice(c.as_bytes());
+    let stamp_id = doc.add_object(lopdf::Stream::new(Dictionary::new(), stamp_bytes));
+
+    let mut contents: Vec<Object> = match doc.get_dictionary(page_id).ok()?.get(b"Contents") {
+        Ok(Object::Reference(id)) => vec![Object::Reference(*id)],
+        Ok(Object::Array(arr)) => arr.clone(),
+        _ => vec![],
+    };
+    contents.insert(0, Object::Reference(save_id));
+    contents.push(Object::Reference(stamp_id));
+    let page = doc.get_object_mut(page_id).ok()?.as_dict_mut().ok()?;
+    page.set("Contents", contents);
+    Some(())
+}
+
+/// Register a font under `name` in the page's resource dictionary, resolving
+/// inheritance and a referenced `/Font` sub-dictionary.
+fn add_font_to_page(
+    doc: &mut Document,
+    page_id: lopdf::ObjectId,
+    name: &[u8],
+    font_id: lopdf::ObjectId,
+) -> Option<()> {
+    // If /Font is a separate object, edit that; else edit the inline dict.
+    let font_ref: Option<lopdf::ObjectId> = {
+        let resources = doc.get_or_create_resources(page_id).ok()?.as_dict_mut().ok()?;
+        if !resources.has(b"Font") {
+            resources.set("Font", Dictionary::new());
+        }
+        match resources.get(b"Font").ok()? {
+            Object::Reference(r) => Some(*r),
+            _ => None,
+        }
+    };
+    match font_ref {
+        Some(r) => {
+            let fonts = doc.get_object_mut(r).ok()?.as_dict_mut().ok()?;
+            fonts.set(name.to_vec(), Object::Reference(font_id));
+        }
+        None => {
+            let resources = doc.get_or_create_resources(page_id).ok()?.as_dict_mut().ok()?;
+            let fonts = resources.get_mut(b"Font").ok()?.as_dict_mut().ok()?;
+            fonts.set(name.to_vec(), Object::Reference(font_id));
+        }
+    }
+    Some(())
+}
+
+/// Escape a string for a PDF literal `(...)` string: `\`, `(`, `)`.
+fn pdf_escape_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '(' => out.push_str("\\("),
+            ')' => out.push_str("\\)"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Return the object id of the `n`th page (1-based), or None if the

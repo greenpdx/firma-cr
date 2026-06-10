@@ -138,6 +138,7 @@ impl TokenSession {
         input_pdf: &[u8],
         reason: Option<&str>,
         location: Option<&str>,
+        placement: Option<crate::agent::sign::StampPlacement>,
     ) -> Result<Vec<u8>, TokenError> {
         use crate::digest::HashAlgo;
         use crate::signer::CardSigner;
@@ -145,6 +146,33 @@ impl TokenSession {
         let cert = self.cert.as_ref().ok_or(TokenError::NotLoggedIn)?;
         let key = self.key.as_ref().ok_or(TokenError::NotLoggedIn)?;
         let signer = CardSigner::new(&self.client, key);
+        let now = std::time::SystemTime::now();
+
+        // Visible signature stamp (bottom-left of page 1): signer + date + reason.
+        let subject = cert.subject_string();
+        let cn = subject
+            .split(',')
+            .find_map(|p| p.trim().strip_prefix("CN="))
+            .unwrap_or(subject.as_str());
+        let secs = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let (yy, mo, dd, hh, mi, _) = crate::pades::secs_to_utc_pub(secs);
+        let mut label = format!(
+            "Firmado digitalmente por\n{cn}\nFecha: {yy:04}-{mo:02}-{dd:02} {hh:02}:{mi:02} UTC"
+        );
+        if let Some(r) = reason {
+            label.push('\n');
+            label.push_str(&format!("Razon: {r}"));
+        }
+        // Caller-chosen placement (interactive box), or a default bottom-left box.
+        let (rect, font_size, page) = match placement {
+            Some(p) => (p.rect, Some(p.font_size), p.page),
+            None => ((36.0, 42.0, 336.0, 132.0), None, 1),
+        };
+        let visible = Some(crate::pades::VisibleAppearance { rect, page, font_size, label });
+
         crate::pades::sign_pdf(
             input_pdf,
             cert,
@@ -153,10 +181,10 @@ impl TokenSession {
             reason,
             location,
             None,
-            std::time::SystemTime::now(),
+            now,
             &signer,
             None,
-            None,
+            visible,
             false,
             None,
         )

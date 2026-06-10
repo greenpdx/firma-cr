@@ -15,6 +15,15 @@ pub struct InputFile {
     pub bytes: Vec<u8>,
 }
 
+/// Where to draw the visible signature stamp (from the GUI's interactive box).
+/// `rect` is PDF points `(llx, lly, urx, ury)`, origin bottom-left.
+#[derive(Clone, Copy, Debug)]
+pub struct StampPlacement {
+    pub rect: (f32, f32, f32, f32),
+    pub font_size: f32,
+    pub page: usize,
+}
+
 /// A signed output.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignedFile {
@@ -58,11 +67,14 @@ pub fn build_sign(
     token: &TokenSession,
     files: &[InputFile],
     reason: Option<&str>,
+    placement: Option<StampPlacement>,
 ) -> Result<Vec<SignedFile>, String> {
     files
         .iter()
         .map(|f| {
-            let bytes = token.sign_pdf(&f.bytes, reason, None).map_err(|e| e.to_string())?;
+            let bytes = token
+                .sign_pdf(&f.bytes, reason, None, placement)
+                .map_err(|e| e.to_string())?;
             Ok(SignedFile { name: signed_name(&f.name), bytes })
         })
         .collect()
@@ -168,7 +180,7 @@ mod tests {
         let mut store = FileStore::new();
         store.add_file("E", "small.pdf", pdf);
         let signed =
-            build_sign(&t, store.files("E"), Some("Prueba firma-cr-agent")).expect("sign");
+            build_sign(&t, store.files("E"), Some("Prueba firma-cr-agent"), None).expect("sign");
 
         assert_eq!(signed.len(), 1);
         assert_eq!(signed[0].name, "small-firmado.pdf");

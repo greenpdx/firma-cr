@@ -558,6 +558,7 @@ fn run(cli: Cli) -> firma_cr_core::Result<()> {
                 .map(|rect| firma_cr_core::pades::VisibleAppearance {
                     rect,
                     page: visible_page,
+                    font_size: None,
                     label: "TEST".to_string(),
                 });
             let profile_upper = opts.profile.to_ascii_uppercase();

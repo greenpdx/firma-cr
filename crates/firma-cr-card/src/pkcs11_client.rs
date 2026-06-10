@@ -47,7 +47,20 @@ impl CardClient {
     pub fn open(module_path: &Path, slot_idx: Option<usize>) -> Result<Self> {
         log::info!("pkcs11: loading module {}", module_path.display());
         let ctx = Pkcs11::new(module_path)?;
-        ctx.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK))?;
+        // The crfirma driver is a process-global singleton (one C_Initialize per
+        // process). Re-opening after a previous session was dropped (e.g. the
+        // agent's self-recovery) returns ALREADY_INITIALIZED — that's fine, the
+        // library is up; we just need a fresh session, not a re-init.
+        match ctx.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
+            Ok(()) => {}
+            Err(cryptoki::error::Error::Pkcs11(
+                cryptoki::error::RvError::CryptokiAlreadyInitialized,
+                _,
+            )) => {
+                log::info!("pkcs11: library already initialized; reusing context");
+            }
+            Err(e) => return Err(e.into()),
+        }
 
         let slots = ctx.get_slots_with_token()?;
         if slots.is_empty() {

@@ -62,6 +62,17 @@ impl AppState {
     pub fn card_mut(&mut self) -> Option<&mut TokenSession> {
         self.card.as_mut()
     }
+
+    /// Drop the live card session so the next `ensure_card()` re-opens a fresh
+    /// one. Self-recovery: when a card/Secure-Messaging op wedges the session
+    /// (a stalled APDU, a cached Chip-Auth failure), the next request rebuilds
+    /// the whole card stack (re-init, re-connect, re-Chip-Auth) instead of
+    /// staying broken until the process restarts.
+    pub fn reset_card(&mut self) {
+        if self.card.take().is_some() {
+            log::warn!("agent: dropping wedged card session; will re-open on next request");
+        }
+    }
 }
 
 /// `Arc<Mutex<AppState>>` — share one of these across the HTTP handlers and any
@@ -91,9 +102,16 @@ pub fn app(module_path: PathBuf) -> Router {
     app_with_state(Arc::new(Mutex::new(AppState::new(module_path))))
 }
 
-/// Bind and serve on `127.0.0.1:41231` over an existing shared state.
+/// The address the `/dyn` server binds. Default `127.0.0.1:41231` (GAUDI's port,
+/// where BCCR sites expect it); override with `FIRMA_CR_DYN_ADDR` (e.g.
+/// `127.0.0.1:51231`) for a test instance alongside the real SCManager.
+pub fn dyn_addr() -> String {
+    std::env::var("FIRMA_CR_DYN_ADDR").unwrap_or_else(|_| "127.0.0.1:41231".to_string())
+}
+
+/// Bind and serve the `/dyn` API over an existing shared state.
 pub async fn serve_with_state(state: Shared) -> std::io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 41231)).await?;
+    let listener = tokio::net::TcpListener::bind(dyn_addr()).await?;
     axum::serve(listener, app_with_state(state)).await
 }
 
@@ -156,12 +174,13 @@ async fn connect(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
 /// never has to touch the driver directly.
 async fn get_token_info(State(st): State<Shared>) -> Response {
     let mut g = st.lock().unwrap();
-    match g.ensure_card() {
-        Ok(card) => match card.info() {
-            Ok(info) => Json(json!({ "ok": true, "info": info })).into_response(),
-            Err(e) => boom(e.to_string()),
-        },
-        Err(e) => boom(e),
+    let result = g.ensure_card().and_then(|card| card.info().map_err(|e| e.to_string()));
+    match result {
+        Ok(info) => Json(json!({ "ok": true, "info": info })).into_response(),
+        Err(e) => {
+            g.reset_card(); // self-recover: a wedged read re-opens next time
+            boom(e)
+        }
     }
 }
 
@@ -179,9 +198,15 @@ async fn login(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
         None => return bad("PIN decrypt failed / unknown env"),
     };
     let Some(card) = g.card.as_mut() else { return bad("not connected") };
-    match card.login(pin.as_str()) {
+    let r = card.login(pin.as_str());
+    match r {
         Ok(()) => Json(LoginResponse { success: true, tries_left: None }).into_response(),
-        Err(_) => Json(LoginResponse { success: false, tries_left: None }).into_response(),
+        Err(_) => {
+            // Wrong PIN or a wedged SM channel — drop the session so the next
+            // attempt re-establishes Chip-Auth cleanly.
+            g.reset_card();
+            Json(LoginResponse { success: false, tries_left: None }).into_response()
+        }
     }
 }
 
@@ -211,6 +236,16 @@ async fn build(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
     if breq.op_type != OperationType::Sign {
         return bad("only type=SIGN is implemented");
     }
+    // Optional interactive stamp placement (GUI's draggable box):
+    // vrect=llx,lly,urx,ury (PDF points) &vfont=<pt> &vpage=<1-based>.
+    let placement = req.param("vrect").and_then(|s| {
+        let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (v.len() == 4).then(|| crate::agent::sign::StampPlacement {
+            rect: (v[0], v[1], v[2], v[3]),
+            font_size: req.param("vfont").and_then(|x| x.parse().ok()).unwrap_or(8.0),
+            page: req.param("vpage").and_then(|x| x.parse().ok()).unwrap_or(1),
+        })
+    });
     let mut g = st.lock().unwrap();
     let files = g.files.files(&env).to_vec();
     if files.is_empty() {
@@ -218,11 +253,14 @@ async fn build(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
     }
     let signed = {
         let Some(card) = g.card.as_ref() else { return bad("not connected/logged in") };
-        build_sign(card, &files, Some("Firma Digital"))
+        build_sign(card, &files, Some("Firma Digital"), placement)
     };
     let signed = match signed {
         Ok(s) => s,
-        Err(e) => return boom(e),
+        Err(e) => {
+            g.reset_card(); // wedged sign — re-establish on the next request
+            return boom(e);
+        }
     };
     let names: Vec<String> = signed.iter().map(|s| s.name.clone()).collect();
     g.signed.insert(env, signed);
