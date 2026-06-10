@@ -31,8 +31,9 @@
     ],
     "linux": {
       "deb": {
-        "depends": [
-          "firma-cr-pkcs11"
+        "recommends": [
+          "firma-cr-pkcs11",
+          "pcscd"
         ]
       }
     }
