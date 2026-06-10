@@ -35,6 +35,16 @@ fn card_info(state: State<Shared>) -> Result<String, String> {
 /// backend — `firma-cr-core` has no PKCS#12 reader, so we return a clear
 /// error rather than pretend. `password` is the card PIN (or, once wired,
 /// the .p12 password). `reason`/`location` are optional signature metadata.
+/// Optional visible-stamp placement from the GUI (PDF points + font + page),
+/// mirroring the web flow's `vrect`/`vfont`/`vpage`.
+#[derive(serde::Deserialize)]
+struct PlacementArg {
+    rect: [f32; 4],
+    #[serde(rename = "fontSize")]
+    font_size: f32,
+    page: usize,
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn sign_pdf(
@@ -46,6 +56,7 @@ fn sign_pdf(
     password: String,
     reason: Option<String>,
     location: Option<String>,
+    placement: Option<PlacementArg>,
 ) -> Result<String, String> {
     if method == "pkcs12" || pkcs12_path.is_some() {
         return Err(
@@ -68,7 +79,11 @@ fn sign_pdf(
             &input,
             reason.as_deref().filter(|s| !s.is_empty()),
             location.as_deref().filter(|s| !s.is_empty()),
-            None, // desktop path: no interactive placement yet → default stamp
+            placement.map(|p| firma_cr_core::agent::sign::StampPlacement {
+                rect: (p.rect[0], p.rect[1], p.rect[2], p.rect[3]),
+                font_size: p.font_size,
+                page: p.page,
+            }),
         )
         .map_err(|e| e.to_string())?
     };
