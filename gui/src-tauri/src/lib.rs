@@ -68,6 +68,7 @@ fn sign_pdf(
             &input,
             reason.as_deref().filter(|s| !s.is_empty()),
             location.as_deref().filter(|s| !s.is_empty()),
+            None, // desktop path: no interactive placement yet → default stamp
         )
         .map_err(|e| e.to_string())?
     };
