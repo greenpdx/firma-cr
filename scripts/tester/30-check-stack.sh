@@ -35,6 +35,16 @@ say "4/4  Read the signing certificate off the card (firma-cr info — no PIN)"
 "$CLI_BIN" info || die "Could not read the cert. Driver loaded but card not readable."
 ok "Certificate read from the card — the full stack works end-to-end"
 
+say "Clock sanity (matters for SIGNING, not for reading the card)"
+synced="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown)"
+if [ "$synced" = yes ]; then
+  ok "system clock NTP-synced ($(date -u '+%Y-%m-%dT%H:%M:%SZ'))"
+else
+  warn "clock NOT NTP-synced (NTPSynchronized=$synced). A Pi has no RTC; a wrong"
+  warn "clock makes signatures carry a bad signingTime and can make verification"
+  warn "falsely fail. Fix before signing in the GUI: sudo timedatectl set-ntp true"
+fi
+
 cat <<'EOF'
 
   ──────────────────────────────────────────────────────────────────────
