@@ -259,6 +259,10 @@ struct TstInfoFields {
     imprint_algo_oid: String,
     imprint_hash: Vec<u8>,
     gen_time: Option<String>,
+    /// `TSTInfo.nonce` (OPTIONAL INTEGER), folded big-endian. Used at
+    /// *issuance* time to confirm the TSA echoed the nonce we sent
+    /// (RFC 3161 §2.4.2 replay/mix-up protection); `None` if absent.
+    nonce: Option<u64>,
 }
 
 /// Parse the bytes that follow `TSTInfo ::= SEQUENCE` and extract the
@@ -321,18 +325,68 @@ fn parse_tst_info(der_bytes: &[u8]) -> Result<TstInfoFields> {
     body = rest;
 
     // genTime GeneralizedTime
-    let (g, _) = read_tlv(body)?;
+    let (g, after_gen) = read_tlv(body)?;
     let gen_time = if g.tag == 0x18 {
         Some(String::from_utf8_lossy(g.value).to_string())
     } else {
         None
     };
 
+    // Optional tail (in order): accuracy SEQUENCE, ordering BOOLEAN
+    // DEFAULT FALSE, nonce INTEGER, tsa [0], extensions [1]. The only
+    // INTEGER that can appear after genTime is the nonce, so scan for
+    // the first 0x02 tag.
+    let mut nonce = None;
+    let mut tail = after_gen;
+    while let Ok((tlv, rest)) = read_tlv(tail) {
+        if tlv.tag == 0x02 {
+            nonce = Some(be_bytes_to_u64(tlv.value));
+            break;
+        }
+        if rest.len() >= tail.len() {
+            break; // no forward progress — stop rather than loop
+        }
+        tail = rest;
+    }
+
     Ok(TstInfoFields {
         imprint_algo_oid: oid_str,
         imprint_hash,
         gen_time,
+        nonce,
     })
+}
+
+/// Fold a DER INTEGER's content octets (big-endian, two's complement
+/// but our nonces are non-negative) into a `u64`, ignoring a leading
+/// sign-padding zero. Values wider than 64 bits wrap — acceptable here
+/// because we only ever compare against a `u64` nonce we generated.
+fn be_bytes_to_u64(b: &[u8]) -> u64 {
+    b.iter().fold(0u64, |acc, &x| (acc << 8) | x as u64)
+}
+
+/// Decode a TimeStampToken and return its `TSTInfo.nonce`, if present.
+///
+/// Used by the TSA *client* immediately after a round-trip to confirm the
+/// response carries the same nonce the request sent (RFC 3161 anti-replay).
+/// `None` means the token contained no nonce.
+pub fn token_nonce(token_der: &[u8]) -> Result<Option<u64>> {
+    let ci = ContentInfo::from_der(token_der)
+        .map_err(|e| Error::Tsa(format!("token ContentInfo decode: {e}")))?;
+    let sd: SignedData = ci
+        .content
+        .decode_as()
+        .map_err(|e| Error::Tsa(format!("token SignedData decode: {e}")))?;
+    let econtent_any = sd
+        .encap_content_info
+        .econtent
+        .as_ref()
+        .ok_or_else(|| Error::Tsa("token encapContentInfo has no eContent".into()))?;
+    let raw = econtent_any.value();
+    let tst_info_der = der::asn1::OctetString::from_der(&wrap_explicit(raw, 0x04)?)
+        .map(|os| os.as_bytes().to_vec())
+        .unwrap_or_else(|_| raw.to_vec());
+    Ok(parse_tst_info(&tst_info_der)?.nonce)
 }
 
 /// Convert a raw OID value-bytes blob into dotted decimal.
@@ -429,6 +483,68 @@ fn read_tlv(b: &[u8]) -> Result<(Tlv<'_>, &[u8])> {
         return Err(Error::Tsa("TLV length exceeds input".into()));
     }
     Ok((Tlv { tag, value: &b[hdr..hdr + len] }, &b[hdr + len..]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tlv(tag: u8, val: &[u8]) -> Vec<u8> {
+        assert!(val.len() < 0x80, "test helper only does short-form lengths");
+        let mut o = vec![tag, val.len() as u8];
+        o.extend_from_slice(val);
+        o
+    }
+
+    #[test]
+    fn be_bytes_folds_nonce() {
+        assert_eq!(be_bytes_to_u64(&[0x12, 0x34]), 0x1234);
+        assert_eq!(be_bytes_to_u64(&[0x00, 0xFF]), 0xFF); // leading sign-pad zero
+        assert_eq!(be_bytes_to_u64(&0xDEAD_BEEF_u64.to_be_bytes()), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn parse_tst_info_extracts_nonce_after_optional_fields() {
+        // Minimal TSTInfo with the optional `ordering BOOLEAN` present
+        // before the nonce, to prove the scan skips it.
+        let sha256_alg = tlv(0x30, &[0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]);
+        let hashed = tlv(0x04, &[0xAA; 32]);
+        let mut mi = sha256_alg;
+        mi.extend_from_slice(&hashed);
+        let message_imprint = tlv(0x30, &mi);
+
+        let nonce_val: u64 = 0x0102_0304_0506_0708;
+        let mut body = Vec::new();
+        body.extend_from_slice(&tlv(0x02, &[0x01])); // version
+        body.extend_from_slice(&tlv(0x06, &[0x2A, 0x03])); // policy OID 1.2.3
+        body.extend_from_slice(&message_imprint);
+        body.extend_from_slice(&tlv(0x02, &[0x05])); // serialNumber
+        body.extend_from_slice(&tlv(0x18, b"20260101000000Z")); // genTime
+        body.extend_from_slice(&tlv(0x01, &[0xFF])); // ordering BOOLEAN TRUE (optional)
+        body.extend_from_slice(&tlv(0x02, &nonce_val.to_be_bytes())); // nonce
+        let tst = tlv(0x30, &body);
+
+        let fields = parse_tst_info(&tst).expect("parse");
+        assert_eq!(fields.nonce, Some(nonce_val));
+        assert_eq!(fields.imprint_algo_oid, "2.16.840.1.101.3.4.2.1");
+    }
+
+    #[test]
+    fn parse_tst_info_nonce_absent_is_none() {
+        let sha256_alg = tlv(0x30, &[0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]);
+        let hashed = tlv(0x04, &[0xBB; 32]);
+        let mut mi = sha256_alg;
+        mi.extend_from_slice(&hashed);
+        let message_imprint = tlv(0x30, &mi);
+        let mut body = Vec::new();
+        body.extend_from_slice(&tlv(0x02, &[0x01]));
+        body.extend_from_slice(&tlv(0x06, &[0x2A, 0x03]));
+        body.extend_from_slice(&message_imprint);
+        body.extend_from_slice(&tlv(0x02, &[0x05]));
+        body.extend_from_slice(&tlv(0x18, b"20260101000000Z"));
+        let tst = tlv(0x30, &body);
+        assert_eq!(parse_tst_info(&tst).unwrap().nonce, None);
+    }
 }
 
 /// Wrap raw bytes in an EXPLICIT [0] tag, used only as a fallback

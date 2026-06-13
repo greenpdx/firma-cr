@@ -426,7 +426,7 @@ fn make_tsa_fn(
     move |sig: &[u8]| {
         let req = firma_cr_core::tsa::TimestampRequest::new(sig, digest);
         let req_der = req.to_der()?;
-        let token = firma_cr_core::tsa::request_token(&tsa_url, &req_der)?;
+        let token = firma_cr_core::tsa::request_token(&tsa_url, &req_der, req.nonce)?;
         Ok(token.token_der)
     }
 }

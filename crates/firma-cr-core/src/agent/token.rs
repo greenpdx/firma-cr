@@ -196,7 +196,7 @@ impl TokenSession {
             Box::new(move |sig: &[u8]| {
                 let req = crate::tsa::TimestampRequest::new(sig, HashAlgo::Sha256);
                 let req_der = req.to_der()?;
-                Ok(crate::tsa::request_token(&url, &req_der)?.token_der)
+                Ok(crate::tsa::request_token(&url, &req_der, req.nonce)?.token_der)
             }) as crate::cades::TimestampFn
         });
 
