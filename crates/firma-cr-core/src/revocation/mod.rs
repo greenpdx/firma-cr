@@ -42,10 +42,7 @@ impl RevocationData {
 pub fn fetch_ocsp(responder_url: &str, request_der: &[u8]) -> Result<Vec<u8>> {
     crate::net::require_web_scheme(responder_url).map_err(Error::Ocsp)?;
     log::info!("ocsp: POST {responder_url} ({} bytes)", request_der.len());
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| Error::Ocsp(format!("HTTP client: {e}")))?;
+    let client = crate::net::guarded_client(std::time::Duration::from_secs(30)).map_err(Error::Ocsp)?;
     let resp = client
         .post(responder_url)
         .header("Content-Type", "application/ocsp-request")
@@ -68,10 +65,7 @@ pub fn fetch_ocsp(responder_url: &str, request_der: &[u8]) -> Result<Vec<u8>> {
 pub fn fetch_crl(cdp_url: &str) -> Result<Vec<u8>> {
     crate::net::require_web_scheme(cdp_url).map_err(Error::Crl)?;
     log::info!("crl: GET {cdp_url}");
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| Error::Crl(format!("HTTP client: {e}")))?;
+    let client = crate::net::guarded_client(std::time::Duration::from_secs(60)).map_err(Error::Crl)?;
     let resp = client
         .get(cdp_url)
         .send()

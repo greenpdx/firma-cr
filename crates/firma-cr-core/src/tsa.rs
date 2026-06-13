@@ -111,10 +111,7 @@ pub struct TimestampToken {
 pub fn request_token(url: &str, req_der: &[u8]) -> Result<TimestampToken> {
     crate::net::require_https(url).map_err(Error::Tsa)?;
     log::info!("tsa: POST {} ({} bytes)", url, req_der.len());
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| Error::Tsa(format!("HTTP client: {e}")))?;
+    let client = crate::net::guarded_client(std::time::Duration::from_secs(30)).map_err(Error::Tsa)?;
     let resp = client
         .post(url)
         .header("Content-Type", "application/timestamp-query")

@@ -56,6 +56,49 @@ pub fn require_https(url: &str) -> Result<(), String> {
     reject_internal_host(&parsed)
 }
 
+/// Cap on HTTP redirects we will follow. Each hop is re-checked against the SSRF
+/// guard (see [`guarded_client`]); this only bounds chain length.
+const MAX_REDIRECTS: usize = 5;
+
+/// Build a blocking `reqwest` client whose redirect policy **re-applies** the
+/// scheme + SSRF guard to every hop.
+///
+/// Without this the initial-URL check in [`require_web_scheme`] / [`require_https`]
+/// is trivially bypassed: the OCSP/CRL/AIA URLs come from the very cert under
+/// verification, so a hostile responder answers `30x → http://169.254.169.254/…`
+/// (or `127.0.0.1`, an internal service, …) and reqwest's *default* policy follows
+/// up to 10 redirects straight past the guard. Here each redirect target must
+/// itself pass [`check_redirect`] or the request errors out.
+pub fn guarded_client(timeout: std::time::Duration) -> Result<reqwest::blocking::Client, String> {
+    let policy = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            return attempt.error(format!("too many redirects (> {MAX_REDIRECTS})"));
+        }
+        match check_redirect(attempt.url()) {
+            Ok(()) => attempt.follow(),
+            Err(e) => attempt.error(e),
+        }
+    });
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .redirect(policy)
+        .build()
+        .map_err(|e| format!("HTTP client: {e}"))
+}
+
+/// Per-hop guard for redirect targets: allow only `http`/`https` and block any
+/// non-public address. Mirrors [`require_web_scheme`] but takes a parsed `Url`
+/// (reqwest hands us one) and is honored even for the https-only TSA path — a
+/// downgrade-to-`http` redirect stays within these (still SSRF-blocked) bounds,
+/// and TSA tokens are signed regardless.
+fn check_redirect(parsed: &url::Url) -> Result<(), String> {
+    let scheme = parsed.scheme();
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) {
+        return Err(format!("refusing non-http(s) redirect (scheme {scheme:?})"));
+    }
+    reject_internal_host(parsed)
+}
+
 /// SSRF guard: reject URLs whose host resolves to a loopback / private /
 /// link-local / otherwise non-public address. URLs come from attacker-influenced
 /// cert extensions (AIA/CRL-DP) and the site-supplied TSA, so this stops them
@@ -179,6 +222,21 @@ mod tests {
         ] {
             assert!(require_web_scheme(u).is_err(), "should block {u}");
         }
+    }
+
+    #[test]
+    fn redirect_guard_blocks_internal_and_nonhttp_hops() {
+        let parse = |u: &str| url::Url::parse(u).unwrap();
+        // A redirect to an internal address / metadata is refused (the SSRF bypass).
+        assert!(check_redirect(&parse("http://127.0.0.1/x")).is_err());
+        assert!(check_redirect(&parse("http://169.254.169.254/latest/")).is_err());
+        assert!(check_redirect(&parse("http://10.0.0.1/x")).is_err());
+        assert!(check_redirect(&parse("http://[::1]/x")).is_err());
+        // Non-http(s) redirect target refused.
+        assert!(check_redirect(&parse("file:///etc/passwd")).is_err());
+        // A redirect to a public host is allowed (legit http->https hops still work).
+        assert!(check_redirect(&parse("https://8.8.8.8/x")).is_ok());
+        assert!(check_redirect(&parse("http://1.1.1.1/x")).is_ok());
     }
 
     #[test]
