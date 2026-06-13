@@ -58,6 +58,13 @@ loads the driver itself — nothing else needs to run.
   pdfsig ~/path/to/signed.pdf      # expect: "Signature is Valid"
   ```
 
+## 5. Security test flow (after the GUI works)
+Once steps 1–4 pass, run [`SECURITY-TEST-FLOW.md`](SECURITY-TEST-FLOW.md): the
+on-card / live-network checks CI can't do — end-to-end signing across profiles
+(B/T/LT/LTA), third-party interop for the c14n fix, the appended-content and
+DNS-rebinding negative tests, the SW=6985 and multi-session regressions, and the
+data-gathering tasks for the still-open card-only audit items.
+
 ## Troubleshooting
 - **`cargo: command not found`** → `source ~/.cargo/env` (or open a new shell).
 - **Step 3 sees no token** → card fully seated? reader plugged in?
