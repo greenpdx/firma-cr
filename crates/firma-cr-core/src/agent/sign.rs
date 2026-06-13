@@ -68,12 +68,13 @@ pub fn build_sign(
     files: &[InputFile],
     reason: Option<&str>,
     placement: Option<StampPlacement>,
+    tsa_url: Option<&str>,
 ) -> Result<Vec<SignedFile>, String> {
     files
         .iter()
         .map(|f| {
             let bytes = token
-                .sign_pdf(&f.bytes, reason, None, placement)
+                .sign_pdf(&f.bytes, reason, None, placement, tsa_url)
                 .map_err(|e| e.to_string())?;
             Ok(SignedFile { name: signed_name(&f.name), bytes })
         })
@@ -180,7 +181,7 @@ mod tests {
         let mut store = FileStore::new();
         store.add_file("E", "small.pdf", pdf);
         let signed =
-            build_sign(&t, store.files("E"), Some("Prueba firma-cr-agent"), None).expect("sign");
+            build_sign(&t, store.files("E"), Some("Prueba firma-cr-agent"), None, None).expect("sign");
 
         assert_eq!(signed.len(), 1);
         assert_eq!(signed[0].name, "small-firmado.pdf");

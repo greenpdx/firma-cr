@@ -57,6 +57,7 @@ fn sign_pdf(
     reason: Option<String>,
     location: Option<String>,
     placement: Option<PlacementArg>,
+    tsa_url: Option<String>,
 ) -> Result<String, String> {
     if method == "pkcs12" || pkcs12_path.is_some() {
         return Err(
@@ -69,8 +70,15 @@ fn sign_pdf(
 
     let input = std::fs::read(&input_path).map_err(|e| format!("read input PDF: {e}"))?;
 
-    // PAdES-B-B sign over the one shared card session (same one the embedded
-    // /dyn agent uses). PIN is used transiently for login and never stored.
+    // TSA for a PAdES-T signature timestamp: explicit arg, else FIRMA_CR_TSA_URL.
+    // Absent both, sign PAdES-B-B.
+    let tsa = tsa_url
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("FIRMA_CR_TSA_URL").ok())
+        .filter(|s| !s.is_empty());
+
+    // Sign over the one shared card session (same one the embedded /dyn agent
+    // uses). PIN is used transiently for login and never stored.
     let signed = {
         let mut g = state.lock().map_err(|_| "card state poisoned".to_string())?;
         let card = g.ensure_card()?;
@@ -84,6 +92,7 @@ fn sign_pdf(
                 font_size: p.font_size,
                 page: p.page,
             }),
+            tsa.as_deref(),
         )
         .map_err(|e| e.to_string())?
     };

@@ -139,6 +139,7 @@ impl TokenSession {
         reason: Option<&str>,
         location: Option<&str>,
         placement: Option<crate::agent::sign::StampPlacement>,
+        tsa_url: Option<&str>,
     ) -> Result<Vec<u8>, TokenError> {
         use crate::digest::HashAlgo;
         use crate::signer::CardSigner;
@@ -173,6 +174,18 @@ impl TokenSession {
         };
         let visible = Some(crate::pades::VisibleAppearance { rect, page, font_size, label });
 
+        // PAdES-T: if a TSA URL is configured, embed an RFC 3161 signature
+        // timestamp (signed over the CMS signature value). Without it we produce
+        // PAdES-B-B as before.
+        let timestamp_fn: Option<crate::cades::TimestampFn> = tsa_url.map(|url| {
+            let url = url.to_string();
+            Box::new(move |sig: &[u8]| {
+                let req = crate::tsa::TimestampRequest::new(sig, HashAlgo::Sha256);
+                let req_der = req.to_der()?;
+                Ok(crate::tsa::request_token(&url, &req_der)?.token_der)
+            }) as crate::cades::TimestampFn
+        });
+
         crate::pades::sign_pdf(
             input_pdf,
             cert,
@@ -183,7 +196,7 @@ impl TokenSession {
             None,
             now,
             &signer,
-            None,
+            timestamp_fn,
             visible,
             false,
             None,
