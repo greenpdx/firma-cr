@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main, audit-fixes]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (hard gate) · fmt + clippy (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install system deps (PC/SC)
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # fmt + clippy are advisory for now: the existing tree predates a
+      # rustfmt/clippy gate, so these surface issues without blocking. Flip
+      # continue-on-error off once the back-catalogue of lints is burned down.
+      - name: rustfmt (advisory)
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+      - name: clippy (advisory)
+        run: cargo clippy --workspace --features agent --all-targets
+        continue-on-error: true
+      # NB: not --all-features. The `test-signer` feature include_str!s generated
+      # fixtures (tests/test_ca/out/, created by gen-test-ca.sh) that aren't
+      # committed, and its tests are #[ignore] (run out-of-band). `agent` covers
+      # the unit + agent HTTP tests.
+      - name: test
+        run: cargo test --workspace --features agent
+
+  deny:
+    name: cargo-deny (advisories · licenses · bans · sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  fuzz-build:
+    name: build fuzz targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install system deps (PC/SC)
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev pkg-config
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # Compile-only: keep the parser fuzz targets from bitrotting. Actual fuzz
+      # campaigns run out-of-band (see fuzz/README.md), not on every push.
+      - name: cargo fuzz build
+        run: cargo fuzz build

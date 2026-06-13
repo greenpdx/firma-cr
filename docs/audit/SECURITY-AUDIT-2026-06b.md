@@ -36,8 +36,10 @@ Status legend: **Fixed** (this pass) · **Mitigated/Documented** · **Deferred**
 | H2d | driver | High | Card's static CA public key read from an **unsigned** EF (D004), no CMS signature check → a rogue card can supply its own key and derive the SM key (decrypt PIN) | **Needs-card** — requires verifying EF.CardSecurity's CMS signature against a pinned CSCA. Documented; inherent to CA-v1 without PACE/TA (attacker must get the user to insert a malicious card and enter their PIN) |
 | H3d | driver | High | RFC-5114 MODP DH (chipdoc path): no validation of the card's public value (small-subgroup/range) | **Fixed** — reject `{0,1,p-1}`/out-of-range card pub and Z (`crypto/dh.rs`) |
 | M1c | core | Med | SSRF: fetchers checked only the URL scheme, not the target IP | **Fixed** — block loopback/private/link-local/CGNAT/metadata/ULA (v4+v6), opt-out `FIRMA_CR_ALLOW_PRIVATE_FETCH` (`net.rs`) |
+| M5c | core | Med | SSRF guard only checked the *initial* URL; reqwest follows redirects by default, so a hostile OCSP/CRL/AIA responder (URLs come from the cert under test) could `30x → 169.254.169.254`/internal IP and bypass M1c | **Fixed** — `net::guarded_client` re-applies the scheme + internal-host check on **every** redirect hop (cap 5); all four fetchers use it (`net.rs`, `revocation/*`, `tsa.rs`) |
+| M5a | agent | Med | `/dyn` server (127.0.0.1, CORS-open) had no `Host`-header check → reachable from a public page via DNS rebinding | **Fixed** — anti-rebinding middleware rejects any non-loopback `Host`; CORS stays open so BCCR sites still work (the browser always sends `Host: 127.0.0.1:<port>`) (`agent/http.rs`) |
 | M2c | core | Med | No OCSP/CRL freshness check (`nextUpdate` ignored) → stale-"good" replay | **Fixed** — reject stale "good" OCSP / stale CRL coverage (past nextUpdate), honoring listed revocations; `validation_time` threaded into `validate_signer` (`verify/revocation.rs`) |
-| M3c | core | Med | TSA client doesn't verify the response nonce | **Deferred** — well-mitigated (the imprint check in `verify_token` already rejects a token over different data); fragile to extract via the hand-rolled TLV walker — do it with a proper TSTInfo decoder |
+| M3c | core | Med | TSA client doesn't verify the response nonce | **Fixed** — `request_token` now extracts `TSTInfo.nonce` (new `verify::tsa::token_nonce`) and requires it to equal the nonce sent; a missing/mismatched nonce is a hard error (anti-replay/mix-up, RFC 3161 §2.4.2) (`tsa.rs`, `verify/tsa.rs`) |
 | M1k | card | Med | cryptoki-path PIN copy not actually zeroized (`.into()` reallocated) | **Fixed** — single `Box<str>` handed to `AuthPin` (`pkcs11_client.rs`) |
 | M2k | card | Med | Arbitrary unsigned `dlopen` of the module path | **Fixed (warn) + Documented** — warn when the module file is group/world-writable (`pkcs11_client.rs`); install root-owned. Trust model in [`SECURITY.md`](../../SECURITY.md) |
 | M3k | card | Med | `fcr_sign` retry could double-sign if `modulus_bits` under-reported | **Mitigated** — `fcr_modulus_bits` (ABI v2) reports the real size; the length-query doesn't sign |
@@ -50,7 +52,8 @@ Status legend: **Fixed** (this pass) · **Mitigated/Documented** · **Deferred**
 | L1 | core | Low | content-type signed attr not checked | **Fixed** — required and compared to eContentType (`verify/cms.rs`) |
 | L4 | core | Low | leaf keyUsage not enforced | **Fixed** — leaf keyUsage, when present, must permit digitalSignature/nonRepudiation (`verify/chain.rs`) |
 | L5 | core | Low | hand-rolled Exclusive C14N "not for adversarial XML" | **Hardened** — `c14n.rs` now fails closed on DTD/DOCTYPE, entity declarations, and non-predefined entity references (XXE/billion-laughs), with exc-c14n conformance + idempotency tests. A full vetted-library swap (libxml2 or a matured pure-Rust crate) remains a follow-up |
-| L2/L3 | core | Low/Info | ESS cert-binding not verified; chain validity-window only checked with `validation_time` | **Deferred** — L3 is a behavioral/product choice (long-term validation); low risk |
+| L2 | core | Low | ESS signing-certificate binding not verified | **Fixed** — `signingCertificateV2` (and legacy v1) `certHash` must match the located signer cert; mismatch is a hard fail, absence a warning (`verify/cms.rs`). Defeats cert substitution within `SignedData.certificates` |
+| L3 | core | Low/Info | signer-cert validity window only checked with an explicit `validation_time` | **Fixed** — validity is now checked against "now" by default; an expired-now cert is demoted to a warning only when a valid embedded timestamp proves the signature predates expiry (ETSI long-term validation) (`verify/cms.rs`) |
 
 ## What was verified sound (coverage)
 CMS signedAttrs + messageDigest binding; TSA token verification; embedded OCSP/CRL
@@ -64,10 +67,27 @@ the localhost + interactive-PIN IPC boundary.
 
 ## Remediation
 Fixes landed on the `audit-fixes` branch of each repo:
-- `firma-cr`: C1/H1c, H1a, H2c, M1c, M2c, M1k, M2k, M2a, M3a, L1, L4.
+- `firma-cr`: C1/H1c, H1a, H2c, M1c, M5c, M5a, M2c, M3c, M2a, M3a, M1k, M2k, L1, L2, L3, L4, L5.
 - `firma-cr-engine`: H3d, M1d, M2d.
 Each fix has a focused commit; new/updated tests: PAdES appended-content
-rejection, SSRF classifier/blocklist; all 33 gated verify round-trips still pass.
+rejection, SSRF classifier/blocklist, redirect-hop guard, `/dyn` rebinding
+rejection; all gated verify round-trips still pass.
+
+**Hardening infrastructure (process):**
+- **Supply-chain gate** — `deny.toml` + CI run `cargo-deny` (RUSTSEC advisories,
+  GPL-compatible license allowlist, yanked-crate + source checks) on every push.
+  One advisory is consciously accepted with justification: **RUSTSEC-2023-0071**
+  (Marvin timing side-channel in the `rsa` crate) — no fixed release exists; this
+  stack does private-key RSA only on-card (signing) or locally (agent PIN OAEP),
+  never over a network-observable timing channel, and verification is public-key
+  only. Tracked to revisit when a constant-time `rsa` ships.
+- **Continuous integration** — `.github/workflows/ci.yml`: `fmt` + `clippy
+  -D warnings` + `cargo test --all-features`, the `cargo-deny` gate, and a
+  `cargo fuzz build` so the fuzz harnesses cannot bitrot.
+- **Fuzz harnesses** — `fuzz/` (cargo-fuzz/libFuzzer) targets the untrusted
+  parsers: `c14n` (Exclusive C14N + idempotency), `cms` (detached CMS verifier),
+  `pades` (PDF `/ByteRange` parser). Campaigns run out-of-band; see
+  [`fuzz/README.md`](../../fuzz/README.md).
 
 ## Residual risk & recommended follow-ups
 **Needs hardware (driver):**
@@ -77,15 +97,14 @@ rejection, SSRF classifier/blocklist; all 33 gated verify round-trips still pass
    harvest. Must be validated on a card.
 2. **M3d:** `C_Logout` should drop card-side authentication.
 
-**Non-card, deferred (low value / behavioral / large):**
-3. **M3c:** verify the TSA response nonce (well-mitigated by the imprint check;
-   needs a proper TSTInfo decoder).
-4. **L3:** apply the cert validity-window by default (a long-term-validation
-   product decision). **L5 (further):** the hand-rolled C14N is now hardened
-   (fails closed on DTD/entities); a full swap to a vetted C14N — libxml2-backed
+**Non-card, remaining (large / lower value):**
+3. **L5 (further):** the hand-rolled C14N is now hardened (fails closed on
+   DTD/entities) and fuzzed; a full swap to a vetted C14N — libxml2-backed
    (`xml_c14n`) or a matured pure-Rust crate (`bergshamra`), validated by
    differential testing against the W3C exc-c14n vectors — is the proper finish.
-   **L2:** verify the ESS signing-certificate binding.
+4. **H2c (further):** a fully namespaced-DOM XAdES reference resolver (the
+   single-`<ds:Signature>` + unique-`Id` guards already block wrapping).
+5. **rsa Marvin (RUSTSEC-2023-0071):** migrate when a constant-time release ships.
 
 ## Certification
 The finalized report is signed with the audit certificate:

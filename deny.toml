@@ -1,0 +1,74 @@
+# cargo-deny configuration — the supply-chain gate for the firma-cr workspace.
+#
+#   cargo install cargo-deny     # one-time
+#   cargo deny check             # advisories + licenses + bans + sources
+#
+# Run in CI (.github/workflows/ci.yml) and locally before a release. This is the
+# software that drives a citizen's signing card, so a known-vulnerable or
+# license-incompatible dependency is a release blocker, not a warning.
+
+[graph]
+all-features = true
+
+# --- Known security advisories (RUSTSEC) ------------------------------------
+[advisories]
+version = 2
+# Refuse to build against a crate version the registry has yanked.
+yanked = "deny"
+# Add a RUSTSEC id here (with a comment + justification) only to consciously
+# accept a finding we cannot yet remediate.
+ignore = [
+    # Marvin Attack — RSA timing side channel in the `rsa` crate. No fixed
+    # version exists yet (RustCrypto/RSA#626). Accepted because the
+    # private-key RSA operations in this stack are NOT done by this crate over
+    # a network-observable channel:
+    #   * Document signing is performed ON THE CARD (PSO:CDS); the private key
+    #     never enters the host and the `rsa` crate is not involved.
+    #   * The agent's only host-side RSA private-key op is decrypting the PIN
+    #     with an ephemeral, per-session env key, locally, in response to a
+    #     localhost request — not exposed to a remote timing observer.
+    #   * Signature *verification* uses RSA public-key ops, which the advisory
+    #     does not concern.
+    # Revisit when a constant-time `rsa` release ships.
+    "RUSTSEC-2023-0071",
+]
+
+# --- License policy ----------------------------------------------------------
+# The workspace is GPL-3.0-or-later; every dependency must be GPL-compatible.
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "GPL-3.0-or-later",
+    "GPL-3.0-only",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MITNFA",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    # Permissive *data* license on the bundled webpki root-certificate set.
+    "CDLA-Permissive-2.0",
+]
+
+# --- Dependency bans ---------------------------------------------------------
+[bans]
+# Duplicate versions of the same crate bloat the tree and the audit surface;
+# warn so we notice drift without blocking on unavoidable transitive dupes.
+multiple-versions = "warn"
+# No `*` version requirements in our own manifests…
+wildcards = "deny"
+# …except path deps (our own crates are intentionally unversioned).
+allow-wildcard-paths = true
+
+# --- Source registries -------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

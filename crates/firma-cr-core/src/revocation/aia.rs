@@ -77,10 +77,7 @@ pub fn ca_issuer_urls(cert: &SignerCert) -> Vec<String> {
 pub fn fetch_issuer(url: &str) -> Result<Vec<u8>> {
     crate::net::require_web_scheme(url).map_err(Error::CertParse)?;
     log::info!("aia: GET {url}");
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| Error::CertParse(format!("HTTP client: {e}")))?;
+    let client = crate::net::guarded_client(std::time::Duration::from_secs(30)).map_err(Error::CertParse)?;
     let resp = client
         .get(url)
         .send()

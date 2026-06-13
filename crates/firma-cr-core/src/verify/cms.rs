@@ -48,6 +48,12 @@ const OID_ARCHIVE_TIMESTAMP_V1: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.27");
 const OID_SUBJECT_KEY_IDENTIFIER: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("2.5.29.14");
+/// ESS `id-aa-signingCertificateV2` (RFC 5035) — SHA-2 cert binding.
+const OID_SIGNING_CERTIFICATE_V2: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.47");
+/// ESS `id-aa-signingCertificate` (RFC 2634, v1) — legacy SHA-1 binding.
+const OID_SIGNING_CERTIFICATE_V1: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.12");
 
 /// Verify a detached CMS (`.p7s` bytes) against the original
 /// `content` and a trust-root cert. Iterates every SignerInfo in
@@ -283,10 +289,32 @@ fn verify_one_signer(
         });
     }
 
-    // Signer cert validity window: only applied when the caller
-    // supplies an explicit validation_time. When None we trust
-    // the embedded signingTime + timestamp evidence and skip the
-    // check, matching pre-12c behavior.
+    // ESS signing-certificate binding (RFC 5035 / CAdES): the signed
+    // attributes commit to a hash of the signer cert, so an attacker
+    // cannot swap a different cert into SignedData.certificates. When
+    // present it must match the located signer; absence is a warning
+    // (some third-party B-B signers omit it — our own always emits V2).
+    match verify_signing_cert_binding(signed_attrs, signer) {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
+            return Ok(SignerVerdict {
+                ok: false,
+                signer_subject: Some(signer.subject_string()),
+                signing_time: extract_signing_time(signed_attrs),
+                has_timestamp: has_timestamp(si.unsigned_attrs.as_ref()),
+                timestamp: None,
+                revocation: None,
+                archive_timestamp: None,
+                warnings: vec![format!("ESS signing-certificate binding: {e}")],
+            });
+        }
+        None => warnings.push("no ESS signing-certificate attribute (cert not bound into the signature)".into()),
+    }
+
+    // Signer cert validity window. With an explicit validation_time we
+    // check at that instant and hard-fail outside it. With None the
+    // default (L3) is applied later, after timestamp evidence is known,
+    // so a still-valid timestamp can vouch for an expired-now cert.
     if let Some(at) = opts.validation_time {
         if let Err(e) = chain::check_validity_at(signer, at) {
             return Ok(SignerVerdict {
@@ -404,6 +432,25 @@ fn verify_one_signer(
         }
     }
 
+    // L3: validity window by default. With no explicit validation_time the
+    // signer cert is checked against "now". An expired-now cert is only a hard
+    // failure when nothing vouches for the signing time — if a valid embedded
+    // timestamp covers the signature (proof it predates expiry, ETSI long-term
+    // validation) the expiry is demoted to a warning.
+    if opts.validation_time.is_none() {
+        if let Err(e) = chain::check_validity_at(signer, std::time::SystemTime::now()) {
+            let timestamp_ok = timestamp_verdict.as_ref().map(|v| v.ok).unwrap_or(false);
+            if timestamp_ok {
+                warnings.push(format!(
+                    "signer cert outside its validity window now, but a valid timestamp covers the signing time: {e}"
+                ));
+            } else {
+                ok = false;
+                warnings.push(format!("signer cert validity (now): {e}"));
+            }
+        }
+    }
+
     Ok(SignerVerdict {
         ok,
         signer_subject: Some(signer.subject_string()),
@@ -481,6 +528,215 @@ fn find_attr<'a>(
     oid: &ObjectIdentifier,
 ) -> Option<&'a Attribute> {
     attrs.as_slice().iter().find(|a| &a.oid == oid)
+}
+
+// ---------- ESS signing-certificate binding (RFC 5035 / RFC 2634) ----------
+
+/// Verify the signed `signingCertificate[V2]` attribute binds the located
+/// `signer`. Returns `None` when neither attribute is present, otherwise
+/// `Some(Ok(()))` on a matching certHash or `Some(Err(_))` on a malformed or
+/// mismatched binding — the latter is the cert-substitution attack this defends.
+fn verify_signing_cert_binding(
+    attrs: &SetOfVec<Attribute>,
+    signer: &SignerCert,
+) -> Option<std::result::Result<(), String>> {
+    let (attr, is_v2) = match find_attr(attrs, &OID_SIGNING_CERTIFICATE_V2) {
+        Some(a) => (a, true),
+        None => (find_attr(attrs, &OID_SIGNING_CERTIFICATE_V1)?, false),
+    };
+    Some(check_ess_binding(attr, signer, is_v2))
+}
+
+fn check_ess_binding(attr: &Attribute, signer: &SignerCert, is_v2: bool) -> std::result::Result<(), String> {
+    let val = attr
+        .values
+        .as_slice()
+        .first()
+        .ok_or("empty attribute value set")?;
+    let der = val.to_der().map_err(|e| format!("attr to_der: {e}"))?;
+    // SigningCertificate[V2] ::= SEQUENCE { certs SEQUENCE OF ESSCertID[V2], policies? }
+    let outer = ess_tlv(&der)?;
+    if outer.tag != 0x30 {
+        return Err("SigningCertificate not SEQUENCE".into());
+    }
+    let certs = ess_tlv(outer.value)?;
+    if certs.tag != 0x30 {
+        return Err("certs not SEQUENCE OF".into());
+    }
+    let ess = ess_tlv(certs.value)?; // first ESSCertID[V2]
+    if ess.tag != 0x30 {
+        return Err("ESSCertID not SEQUENCE".into());
+    }
+
+    // ESSCertIDv2 ::= SEQUENCE { hashAlgorithm AlgorithmIdentifier DEFAULT sha256,
+    //                            certHash OCTET STRING, issuerSerial? }
+    // ESSCertID (v1) ::= SEQUENCE { certHash OCTET STRING (SHA-1), issuerSerial? }
+    let first = ess_tlv(ess.value)?;
+    let (oid_str, cert_hash): (Option<String>, &[u8]) = if first.tag == 0x30 {
+        // explicit hashAlgorithm present
+        let oid = ess_tlv(first.value)?;
+        if oid.tag != 0x06 {
+            return Err("hashAlgorithm OID expected".into());
+        }
+        let s = ess_oid_to_string(oid.value)?;
+        let after = ess.value.get(ess_total(&first)..).unwrap_or(&[]);
+        let ch = ess_tlv(after)?;
+        if ch.tag != 0x04 {
+            return Err("certHash not OCTET STRING".into());
+        }
+        (Some(s), ch.value)
+    } else if first.tag == 0x04 {
+        (None, first.value) // hashAlgorithm omitted → DEFAULT
+    } else {
+        return Err(format!("unexpected ESSCertID element tag {:#x}", first.tag));
+    };
+
+    let want = match oid_str.as_deref() {
+        Some("2.16.840.1.101.3.4.2.1") => signer.cert_digest(HashAlgo::Sha256),
+        Some("2.16.840.1.101.3.4.2.2") => signer.cert_digest(HashAlgo::Sha384),
+        Some("2.16.840.1.101.3.4.2.3") => signer.cert_digest(HashAlgo::Sha512),
+        Some("1.3.14.3.2.26") => sha1_digest(&signer.der),
+        Some(other) => return Err(format!("unsupported ESS hash OID {other}")),
+        // DEFAULT: V2 → SHA-256, v1 → SHA-1.
+        None if is_v2 => signer.cert_digest(HashAlgo::Sha256),
+        None => sha1_digest(&signer.der),
+    };
+    if want.as_slice() == cert_hash {
+        Ok(())
+    } else {
+        Err("certHash does not match the signer certificate (possible cert substitution)".into())
+    }
+}
+
+fn sha1_digest(data: &[u8]) -> Vec<u8> {
+    use sha1::Digest;
+    sha1::Sha1::digest(data).to_vec()
+}
+
+struct EssTlv<'a> {
+    tag: u8,
+    header_len: usize,
+    value: &'a [u8],
+}
+
+fn ess_total(t: &EssTlv) -> usize {
+    t.header_len + t.value.len()
+}
+
+/// Minimal DER TLV reader for the ESS attribute walk. Bounds-checked; short and
+/// long-form lengths up to 4 length octets.
+fn ess_tlv(b: &[u8]) -> std::result::Result<EssTlv<'_>, String> {
+    if b.len() < 2 {
+        return Err("ESS TLV truncated".into());
+    }
+    let tag = b[0];
+    let l = b[1];
+    let (len, hdr) = if l < 0x80 {
+        (l as usize, 2)
+    } else {
+        let n = (l & 0x7F) as usize;
+        if n == 0 || n > 4 || b.len() < 2 + n {
+            return Err("ESS TLV bad length".into());
+        }
+        let mut v = 0usize;
+        for &x in &b[2..2 + n] {
+            v = (v << 8) | x as usize;
+        }
+        (v, 2 + n)
+    };
+    if b.len() < hdr + len {
+        return Err("ESS TLV length exceeds input".into());
+    }
+    Ok(EssTlv {
+        tag,
+        header_len: hdr,
+        value: &b[hdr..hdr + len],
+    })
+}
+
+/// Convert an OID's content octets to dotted-decimal.
+fn ess_oid_to_string(v: &[u8]) -> std::result::Result<String, String> {
+    if v.is_empty() {
+        return Err("OID empty".into());
+    }
+    let mut out = format!("{}.{}", v[0] / 40, v[0] % 40);
+    let mut i = 1usize;
+    while i < v.len() {
+        let mut value: u64 = 0;
+        loop {
+            if i >= v.len() {
+                return Err("OID truncated".into());
+            }
+            let b = v[i];
+            value = (value << 7) | (b & 0x7F) as u64;
+            i += 1;
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        out.push('.');
+        out.push_str(&value.to_string());
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use der::Any;
+
+    // Committed fixture (a throwaway self-signed cert) — not the gitignored,
+    // generated test_ca/out/ tree, so this compiles on a clean checkout / CI.
+    const TEST_ROOT: &str = include_str!("../../tests/fixtures/sample-cert.pem");
+
+    fn tlv(tag: u8, val: &[u8]) -> Vec<u8> {
+        assert!(val.len() < 0x80, "test helper does short-form lengths only");
+        let mut o = vec![tag, val.len() as u8];
+        o.extend_from_slice(val);
+        o
+    }
+
+    /// Build a `signingCertificateV2` attribute set carrying one ESSCertIDv2
+    /// whose hashAlgorithm is omitted (DEFAULT sha256) and certHash is `hash`.
+    fn signing_cert_v2_attr(hash: &[u8]) -> SetOfVec<Attribute> {
+        let ess = tlv(0x30, &tlv(0x04, hash)); // ESSCertIDv2 { certHash }
+        let certs = tlv(0x30, &ess); // certs SEQUENCE OF
+        let outer = tlv(0x30, &certs); // SigningCertificateV2
+        let attr = Attribute {
+            oid: OID_SIGNING_CERTIFICATE_V2,
+            values: SetOfVec::try_from(vec![Any::from_der(&outer).unwrap()]).unwrap(),
+        };
+        SetOfVec::try_from(vec![attr]).unwrap()
+    }
+
+    #[test]
+    fn ess_binding_matches_signer() {
+        let signer = SignerCert::from_pem_str(TEST_ROOT).unwrap();
+        let attrs = signing_cert_v2_attr(&signer.cert_digest(HashAlgo::Sha256));
+        assert!(matches!(
+            verify_signing_cert_binding(&attrs, &signer),
+            Some(Ok(()))
+        ));
+    }
+
+    #[test]
+    fn ess_binding_rejects_substituted_cert() {
+        let signer = SignerCert::from_pem_str(TEST_ROOT).unwrap();
+        let mut h = signer.cert_digest(HashAlgo::Sha256);
+        h[0] ^= 0xFF; // certHash no longer matches the signer cert
+        let attrs = signing_cert_v2_attr(&h);
+        assert!(matches!(
+            verify_signing_cert_binding(&attrs, &signer),
+            Some(Err(_))
+        ));
+    }
+
+    #[test]
+    fn ess_binding_absent_is_none() {
+        let signer = SignerCert::from_pem_str(TEST_ROOT).unwrap();
+        let empty: SetOfVec<Attribute> = SetOfVec::try_from(Vec::<Attribute>::new()).unwrap();
+        assert!(verify_signing_cert_binding(&empty, &signer).is_none());
+    }
 }
 
 fn extract_signing_time(attrs: &SetOfVec<Attribute>) -> Option<String> {

@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
-use axum::extract::{RawQuery, State};
+use axum::extract::{Request, RawQuery, State};
 use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -155,7 +156,50 @@ pub fn app_with_state(state: Shared) -> Router {
         .route("/dyn/cryptoshell_build", get(build))
         .route("/dyn/download", get(download))
         .layer(cors)
+        // Outermost: reject non-loopback Host headers. CORS lets *any web origin*
+        // call us (BCCR sites must), but that plus a 127.0.0.1 bind leaves us open
+        // to DNS rebinding — a public page rebinds its hostname to 127.0.0.1 and
+        // drives the agent from the victim's browser. The browser still sends the
+        // attacker's hostname in `Host:`, so allowlisting loopback Hosts blocks the
+        // rebind while every legitimate caller (which connects to 127.0.0.1:<port>)
+        // passes unaffected.
+        .layer(middleware::from_fn(require_local_host))
         .with_state(state)
+}
+
+/// Reject any request whose `Host` header is not a loopback name/literal —
+/// anti-DNS-rebinding for the localhost-bound `/dyn` server. See the comment at
+/// the layer site in [`app_with_state`].
+async fn require_local_host(req: Request, next: Next) -> Response {
+    let allowed = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(host_is_local)
+        .unwrap_or(false);
+    if allowed {
+        next.run(req).await
+    } else {
+        (StatusCode::FORBIDDEN, "refusing non-loopback Host header\n").into_response()
+    }
+}
+
+/// True iff `host` (a `Host:` header value, with optional port) names loopback:
+/// `localhost`, `127.0.0.0/8`, or `[::1]`. Hostnames that resolve elsewhere — the
+/// DNS-rebinding case — are rejected.
+fn host_is_local(host: &str) -> bool {
+    let h = host.trim();
+    // Strip the optional port. IPv6 literals are bracketed: `[::1]` / `[::1]:port`.
+    let name = if let Some(rest) = h.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        h.rsplit_once(':').map(|(host, _port)| host).unwrap_or(h)
+    };
+    name.eq_ignore_ascii_case("localhost")
+        || name
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 /// Build the `/dyn` router with fresh state. `module_path` is the crfirma `.so`.
@@ -426,6 +470,7 @@ mod tests {
         let req = Request::builder()
             .method(method)
             .uri(uri)
+            .header(header::HOST, "127.0.0.1:41231") // pass the anti-rebinding guard
             .body(body.map(Body::from).unwrap_or_else(Body::empty))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
@@ -470,6 +515,30 @@ mod tests {
         let mut buf = Vec::new();
         doc.save_to(&mut buf).unwrap();
         buf
+    }
+
+    #[test]
+    fn host_is_local_classifies_loopback_only() {
+        for h in ["127.0.0.1", "127.0.0.1:41231", "localhost", "LocalHost:41231", "[::1]", "[::1]:41231", "127.5.6.7"] {
+            assert!(host_is_local(h), "{h} should be local");
+        }
+        for h in ["evil.com", "evil.com:41231", "attacker.example:41231", "10.0.0.1", "8.8.8.8:41231", ""] {
+            assert!(!host_is_local(h), "{h} should be rejected");
+        }
+    }
+
+    /// A rebound (non-loopback) Host header is refused before reaching any handler.
+    #[tokio::test]
+    async fn rebinding_host_is_rejected() {
+        let app = app(PathBuf::from("/nonexistent.so"));
+        let req = Request::builder()
+            .method("GET")
+            .uri("/dyn/create_env")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     /// Pure: create_env wiring works with no card.

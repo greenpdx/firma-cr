@@ -108,13 +108,19 @@ pub struct TimestampToken {
 /// POST `req_der` to `url` and parse the response. The HTTP client is
 /// `reqwest` blocking (rustls TLS). Returns `Err` if the TSA rejects
 /// the request or if the response is malformed.
-pub fn request_token(url: &str, req_der: &[u8]) -> Result<TimestampToken> {
+///
+/// `expected_nonce` is the nonce placed in the request (`TimestampRequest.nonce`).
+/// When `Some`, the embedded token's `TSTInfo.nonce` must match it — RFC 3161
+/// §2.4.2 anti-replay / response-mix-up protection. A missing or mismatched nonce
+/// is a hard error. Pass `None` only for a request that carried no nonce.
+pub fn request_token(
+    url: &str,
+    req_der: &[u8],
+    expected_nonce: Option<u64>,
+) -> Result<TimestampToken> {
     crate::net::require_https(url).map_err(Error::Tsa)?;
     log::info!("tsa: POST {} ({} bytes)", url, req_der.len());
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| Error::Tsa(format!("HTTP client: {e}")))?;
+    let client = crate::net::guarded_client(std::time::Duration::from_secs(30)).map_err(Error::Tsa)?;
     let resp = client
         .post(url)
         .header("Content-Type", "application/timestamp-query")
@@ -127,7 +133,25 @@ pub fn request_token(url: &str, req_der: &[u8]) -> Result<TimestampToken> {
         return Err(Error::Tsa(format!("HTTP {} from TSA", status)));
     }
     let body = crate::net::read_capped(resp, crate::net::MAX_TSA_BYTES).map_err(Error::Tsa)?;
-    parse_response(&body)
+    let token = parse_response(&body)?;
+
+    // Anti-replay: the TSA must echo the nonce we sent.
+    if let Some(expected) = expected_nonce {
+        match crate::verify::tsa::token_nonce(&token.token_der)? {
+            Some(got) if got == expected => {}
+            Some(got) => {
+                return Err(Error::Tsa(format!(
+                    "TSA response nonce mismatch: sent {expected:#018x}, got {got:#018x}"
+                )));
+            }
+            None => {
+                return Err(Error::Tsa(
+                    "TSA response omitted the nonce we sent (possible replay)".into(),
+                ));
+            }
+        }
+    }
+    Ok(token)
 }
 
 /// Parse a TimeStampResp DER into the embedded TimeStampToken.
