@@ -685,7 +685,9 @@ mod tests {
     use super::*;
     use der::Any;
 
-    const TEST_ROOT: &str = include_str!("../../tests/test_ca/out/test-root.crt");
+    // Committed fixture (a throwaway self-signed cert) — not the gitignored,
+    // generated test_ca/out/ tree, so this compiles on a clean checkout / CI.
+    const TEST_ROOT: &str = include_str!("../../tests/fixtures/sample-cert.pem");
 
     fn tlv(tag: u8, val: &[u8]) -> Vec<u8> {
         assert!(val.len() < 0x80, "test helper does short-form lengths only");

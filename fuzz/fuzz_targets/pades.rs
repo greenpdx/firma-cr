@@ -18,9 +18,9 @@ fn trust_root() -> &'static SignerCert {
     static ROOT: OnceLock<SignerCert> = OnceLock::new();
     ROOT.get_or_init(|| {
         SignerCert::from_pem_str(include_str!(
-            "../../crates/firma-cr-core/tests/test_ca/out/test-root.crt"
+            "../../crates/firma-cr-core/tests/fixtures/sample-cert.pem"
         ))
-        .expect("bundled test root parses")
+        .expect("bundled fixture cert parses")
     })
 }
 

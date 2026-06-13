@@ -17,12 +17,12 @@ use libfuzzer_sys::fuzz_target;
 fn trust_root() -> &'static SignerCert {
     static ROOT: OnceLock<SignerCert> = OnceLock::new();
     ROOT.get_or_init(|| {
-        // Reuse the workspace test CA root; we only need a well-formed anchor so
-        // the verifier reaches its parse/chain/attribute logic.
+        // A committed fixture cert: we only need a well-formed anchor so the
+        // verifier reaches its parse/chain/attribute logic.
         SignerCert::from_pem_str(include_str!(
-            "../../crates/firma-cr-core/tests/test_ca/out/test-root.crt"
+            "../../crates/firma-cr-core/tests/fixtures/sample-cert.pem"
         ))
-        .expect("bundled test root parses")
+        .expect("bundled fixture cert parses")
     })
 }
 

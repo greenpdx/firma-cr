@@ -37,6 +37,6 @@ so they don't bitrot; real campaigns run out-of-band here.
 Committed starter inputs live in `fuzz/seeds/<target>/`; the live, fuzzer-grown
 corpus in `fuzz/corpus/<target>/` is git-ignored. Drop real samples into
 `fuzz/seeds/` to bootstrap coverage — e.g. a genuine signed `.p7s` into
-`seeds/cms/`, a signed PDF into `seeds/pades/`. The `cms`/`pades` targets use the
-workspace test-CA root (`crates/firma-cr-core/tests/test_ca/`) as a fixed trust
-anchor so the verifier reaches its parse/validate logic.
+`seeds/cms/`, a signed PDF into `seeds/pades/`. The `cms`/`pades` targets use a
+committed fixture cert (`crates/firma-cr-core/tests/fixtures/sample-cert.pem`) as a
+fixed trust anchor so the verifier reaches its parse/validate logic.
