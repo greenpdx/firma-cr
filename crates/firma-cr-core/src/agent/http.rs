@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
@@ -27,6 +28,30 @@ use crate::agent::session::EnvStore;
 use crate::agent::sign::{build_sign, FileStore, SignedFile};
 use crate::agent::token::TokenSession;
 
+// --- abuse limits on the (CORS-open, localhost) /dyn surface -----------------
+// The agent must stay callable by BCCR websites, so we don't authenticate; we
+// instead cap the cheap-to-abuse paths. A malicious local page cannot make these
+// limits looser, and they don't change the wire protocol.
+
+/// Max failed `/dyn/login` attempts per env before a cooldown kicks in. Keeps a
+/// hostile page from burning the card's own (small) PIN retry counter or using
+/// repeated logins as a denial-of-service against the cardholder.
+const MAX_LOGIN_FAILS: u32 = 5;
+/// Sliding window / cooldown for the login limiter.
+const LOGIN_WINDOW: Duration = Duration::from_secs(60);
+/// Max bytes accepted by `cryptoshell_add_file` for one document (memory bound).
+const MAX_UPLOAD_BYTES: usize = 32 << 20; // 32 MiB
+/// Max staged documents per env.
+const MAX_FILES_PER_ENV: usize = 32;
+/// Max length of a caller-supplied file name.
+const MAX_NAME_LEN: usize = 255;
+
+/// Per-env failed-login tracker for the rate limiter.
+struct LoginThrottle {
+    fails: u32,
+    first_fail: Instant,
+}
+
 /// The agent's shared card + session state. Public so an embedding app (Firma
 /// CR) can construct ONE instance and share it between the HTTP handlers and its
 /// own card commands — crfirma's `C_Initialize` is a process-global singleton,
@@ -37,6 +62,7 @@ pub struct AppState {
     files: FileStore,
     signed: HashMap<String, Vec<SignedFile>>,
     module_path: PathBuf,
+    login_throttle: HashMap<String, LoginThrottle>,
 }
 
 impl AppState {
@@ -47,7 +73,39 @@ impl AppState {
             files: FileStore::new(),
             signed: HashMap::new(),
             module_path,
+            login_throttle: HashMap::new(),
         }
+    }
+
+    /// If this env is currently locked out for too many failed logins, return the
+    /// number of seconds left in the cooldown; otherwise `None`.
+    fn login_lockout_remaining(&self, env: &str) -> Option<u64> {
+        let t = self.login_throttle.get(env)?;
+        if t.fails >= MAX_LOGIN_FAILS {
+            let elapsed = t.first_fail.elapsed();
+            if elapsed < LOGIN_WINDOW {
+                return Some((LOGIN_WINDOW - elapsed).as_secs() + 1);
+            }
+        }
+        None
+    }
+
+    /// Record a failed login for `env`, starting/refreshing the window.
+    fn record_login_failure(&mut self, env: &str) {
+        let t = self
+            .login_throttle
+            .entry(env.to_string())
+            .or_insert(LoginThrottle { fails: 0, first_fail: Instant::now() });
+        if t.first_fail.elapsed() >= LOGIN_WINDOW {
+            t.fails = 0;
+            t.first_fail = Instant::now();
+        }
+        t.fails = t.fails.saturating_add(1);
+    }
+
+    /// Clear the failed-login counter for `env` (called on a successful login).
+    fn clear_login_failures(&mut self, env: &str) {
+        self.login_throttle.remove(env);
     }
 
     /// Connect the card if not already connected (idempotent — never opens a
@@ -192,6 +250,16 @@ async fn login(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
         Err(e) => return bad(e),
     };
     let mut g = st.lock().unwrap();
+    // Rate-limit: refuse if this env is in a failed-login cooldown. Stops a
+    // hostile local page from hammering PIN guesses (which would also burn the
+    // card's own retry counter and could lock the cardholder out).
+    if let Some(secs) = g.login_lockout_remaining(&env) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("too many failed login attempts; retry in {secs}s"),
+        )
+            .into_response();
+    }
     // Decrypt the PIN with the env private key; never persist it.
     let pin = match g.envs.decrypt_pin(&env, &login_req.encrypted_pin_b64) {
         Some(p) => Zeroizing::new(p),
@@ -200,8 +268,12 @@ async fn login(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
     let Some(card) = g.card.as_mut() else { return bad("not connected") };
     let r = card.login(pin.as_str());
     match r {
-        Ok(()) => Json(LoginResponse { success: true, tries_left: None }).into_response(),
+        Ok(()) => {
+            g.clear_login_failures(&env);
+            Json(LoginResponse { success: true, tries_left: None }).into_response()
+        }
         Err(_) => {
+            g.record_login_failure(&env);
             // Wrong PIN or a wedged SM channel — drop the session so the next
             // attempt re-establishes Chip-Auth cleanly.
             g.reset_card();
@@ -220,8 +292,28 @@ async fn get_certs(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response 
 async fn add_file(State(st): State<Shared>, RawQuery(q): RawQuery, body: Bytes) -> Response {
     let req = parse(&q, "cryptoshell_add_file");
     let Some(env) = req.env.clone() else { return bad("missing env") };
-    let name = req.param("name").unwrap_or("document.pdf").to_string();
+    // Bound the upload so any local caller can't OOM the agent with one request.
+    if body.len() > MAX_UPLOAD_BYTES {
+        return bad(format!(
+            "file too large: {} B > {MAX_UPLOAD_BYTES} B limit",
+            body.len()
+        ));
+    }
+    // Sanitize the caller-supplied name: strip path components (it must never be
+    // usable as a path) and cap its length.
+    let raw = req.param("name").unwrap_or("document.pdf");
+    let name = std::path::Path::new(raw)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("document.pdf")
+        .to_string();
+    if name.is_empty() || name.len() > MAX_NAME_LEN {
+        return bad("invalid file name");
+    }
     let mut g = st.lock().unwrap();
+    if g.files.files(&env).len() >= MAX_FILES_PER_ENV {
+        return bad(format!("too many files staged for env (max {MAX_FILES_PER_ENV})"));
+    }
     g.files.add_file(&env, &name, body.to_vec());
     Json(json!({ "ok": true, "name": name })).into_response()
 }

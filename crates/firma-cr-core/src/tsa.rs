@@ -33,7 +33,7 @@
 //!   }
 
 use der::asn1::{BitString, Int, OctetString};
-use der::{Any, Decode, Encode, oid::ObjectIdentifier};
+use der::{Any, Encode, oid::ObjectIdentifier};
 use spki::AlgorithmIdentifierOwned;
 
 use crate::digest::HashAlgo;
@@ -109,6 +109,7 @@ pub struct TimestampToken {
 /// `reqwest` blocking (rustls TLS). Returns `Err` if the TSA rejects
 /// the request or if the response is malformed.
 pub fn request_token(url: &str, req_der: &[u8]) -> Result<TimestampToken> {
+    crate::net::require_https(url).map_err(Error::Tsa)?;
     log::info!("tsa: POST {} ({} bytes)", url, req_der.len());
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -125,9 +126,7 @@ pub fn request_token(url: &str, req_der: &[u8]) -> Result<TimestampToken> {
     if !status.is_success() {
         return Err(Error::Tsa(format!("HTTP {} from TSA", status)));
     }
-    let body = resp
-        .bytes()
-        .map_err(|e| Error::Tsa(format!("read TSA response: {e}")))?;
+    let body = crate::net::read_capped(resp, crate::net::MAX_TSA_BYTES).map_err(Error::Tsa)?;
     parse_response(&body)
 }
 
@@ -192,7 +191,7 @@ fn tlv_total_len(t: Tlv) -> usize {
     t.header_len + t.value.len()
 }
 
-fn read_tlv(b: &[u8]) -> Result<(Tlv, &[u8])> {
+fn read_tlv(b: &[u8]) -> Result<(Tlv<'_>, &[u8])> {
     if b.len() < 2 {
         return Err(Error::Tsa("TLV truncated".into()));
     }
@@ -261,16 +260,25 @@ fn seq(body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A cryptographically-random 64-bit RFC 3161 nonce, drawn from the OS CSPRNG via
+/// `getrandom`. The nonce ties our request to the TSA's response (replay / mix-up
+/// resistance), so it must be unpredictable — a time-seeded PRNG (the previous
+/// implementation) was guessable. If the OS RNG is somehow unavailable we fall
+/// back to a time-derived value rather than panic: a worse-but-nonzero nonce on a
+/// path that is already best-effort.
 fn rand_u64() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
-        .unwrap_or(0);
-    let mut x = nanos.wrapping_add(0x9E3779B97F4A7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
-    x ^ (x >> 31)
+    let mut b = [0u8; 8];
+    match getrandom::getrandom(&mut b) {
+        Ok(()) => u64::from_le_bytes(b),
+        Err(_) => {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+                .wrapping_add(0x9E3779B97F4A7C15)
+        }
+    }
 }
 
 // Suppress unused-import warnings on the OID const + BitString import

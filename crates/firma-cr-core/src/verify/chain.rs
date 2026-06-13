@@ -7,19 +7,32 @@
 //! match, RSA-verify each link, and check basic constraints on each
 //! intermediate.
 //!
+//! For each cert used as an *issuer* (it signed the cert below it) we enforce the
+//! RFC 5280 CA constraints: `basicConstraints` must be present with `cA = TRUE`,
+//! any `pathLenConstraint` must permit the number of intermediate CAs below it,
+//! and a present `keyUsage` must assert `keyCertSign`. This stops an end-entity
+//! cert (issued under the trust root for some other purpose) from validating as a
+//! CA.
+//!
 //! Out of scope (Phase 9 minimum-viable):
 //!   * CRL / OCSP revocation checks (Phase 10 — uses revocation.rs).
 //!   * Name constraints, certificate policies.
-//!   * Path-length constraint enforcement (we only check the
-//!     `CA:TRUE` flag).
 
+use der::Decode;
+use der::oid::ObjectIdentifier;
 use rsa::{Pkcs1v15Sign, RsaPublicKey};
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::pkcs8::DecodePublicKey;
 use sha2::{Digest, Sha256, Sha384, Sha512};
+use x509_cert::ext::pkix::{BasicConstraints, KeyUsage};
 
 use crate::cert::SignerCert;
 use crate::error::{Error, Result};
+
+// Use `der::oid` constants so the type matches `extension.extn_id` (the crate
+// pulls in two const_oid versions; this is the one x509-cert exposes here).
+const OID_BASIC_CONSTRAINTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.19");
+const OID_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.15");
 
 /// Build a verified path from `leaf` to one of the `roots`,
 /// using `intermediates` to fill the gap. Returns the chain in
@@ -31,6 +44,9 @@ pub fn build_and_verify_chain<'a>(
 ) -> Result<Vec<&'a SignerCert>> {
     let mut chain: Vec<&SignerCert> = vec![leaf];
     let mut current = leaf;
+    // Number of non-self-issued CA certs already placed below the issuer we are
+    // about to validate — used to enforce each CA's pathLenConstraint.
+    let mut intermediate_cas_below = 0usize;
 
     for _step in 0..16 {
         // Stop if `current` is self-issued and present in the
@@ -54,6 +70,8 @@ pub fn build_and_verify_chain<'a>(
             })?;
 
         verify_signed_by(current, issuer)?;
+        // The issuer signed `current`, so it must be a valid CA per RFC 5280.
+        enforce_ca_constraints(issuer, intermediate_cas_below)?;
         chain.push(issuer);
 
         // If the issuer is in the trust-root set, we're done.
@@ -61,6 +79,10 @@ pub fn build_and_verify_chain<'a>(
             if same_subject_and_key(issuer, r) {
                 return Ok(chain);
             }
+        }
+        // A non-self-issued issuer is an intermediate CA below the next issuer.
+        if !is_self_issued(issuer) {
+            intermediate_cas_below += 1;
         }
         current = issuer;
     }
@@ -80,10 +102,115 @@ fn find_issuer<'a>(child: &SignerCert, set: &[&'a SignerCert]) -> Option<&'a Sig
         .copied()
 }
 
+/// Enforce RFC 5280 CA constraints on a cert acting as an issuer (it signed the
+/// cert below it in the path). `intermediate_cas_below` is the number of
+/// non-self-issued CA certs already placed between this issuer and the leaf.
+///
+/// Rules:
+///   * `basicConstraints` must be present with `cA = TRUE` — a cert without it,
+///     or with `cA = FALSE`, is an end-entity cert and must not validate as a CA.
+///   * a present `pathLenConstraint` must be >= `intermediate_cas_below`.
+///   * a present `keyUsage` must assert `keyCertSign`.
+fn enforce_ca_constraints(issuer: &SignerCert, intermediate_cas_below: usize) -> Result<()> {
+    let exts = issuer
+        .parsed
+        .tbs_certificate
+        .extensions
+        .as_ref()
+        .ok_or_else(|| {
+            Error::CertParse(format!(
+                "issuer {:?} has no extensions; not a valid CA",
+                issuer.subject_string()
+            ))
+        })?;
+
+    // basicConstraints: required, cA must be TRUE.
+    let bc_ext = exts
+        .iter()
+        .find(|e| e.extn_id == OID_BASIC_CONSTRAINTS)
+        .ok_or_else(|| {
+            Error::CertParse(format!(
+                "issuer {:?} lacks basicConstraints; not a CA",
+                issuer.subject_string()
+            ))
+        })?;
+    let bc = BasicConstraints::from_der(bc_ext.extn_value.as_bytes())
+        .map_err(|e| Error::CertParse(format!("issuer basicConstraints parse: {e}")))?;
+    if !bc.ca {
+        return Err(Error::CertParse(format!(
+            "issuer {:?} is not a CA (basicConstraints cA=FALSE)",
+            issuer.subject_string()
+        )));
+    }
+    if let Some(max) = bc.path_len_constraint
+        && intermediate_cas_below > max as usize
+    {
+        return Err(Error::CertParse(format!(
+            "pathLenConstraint violated for issuer {:?}: allows {max} intermediate CA(s), found {intermediate_cas_below}",
+            issuer.subject_string()
+        )));
+    }
+
+    // keyUsage: if present, keyCertSign must be set.
+    if let Some(ku_ext) = exts.iter().find(|e| e.extn_id == OID_KEY_USAGE) {
+        let ku = KeyUsage::from_der(ku_ext.extn_value.as_bytes())
+            .map_err(|e| Error::CertParse(format!("issuer keyUsage parse: {e}")))?;
+        if !ku.key_cert_sign() {
+            return Err(Error::CertParse(format!(
+                "issuer {:?} keyUsage lacks keyCertSign",
+                issuer.subject_string()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn same_subject_and_key(a: &SignerCert, b: &SignerCert) -> bool {
     a.parsed.tbs_certificate.subject == b.parsed.tbs_certificate.subject
         && a.parsed.tbs_certificate.subject_public_key_info
             == b.parsed.tbs_certificate.subject_public_key_info
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn ca_out() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_ca/out")
+    }
+
+    /// `enforce_ca_constraints` accepts the CA certs and rejects the end-entity
+    /// leaf (basicConstraints cA=FALSE) and a pathLen overflow. Skips when the
+    /// test CA hasn't been generated (run tests/test_ca/gen-test-ca.sh).
+    #[test]
+    fn ca_constraints_enforced() {
+        let dir = ca_out();
+        if !dir.join("test-leaf.crt").exists() {
+            eprintln!("test CA absent — run tests/test_ca/gen-test-ca.sh; skipping");
+            return;
+        }
+        let leaf = SignerCert::from_file(&dir.join("test-leaf.crt")).unwrap();
+        let ica = SignerCert::from_file(&dir.join("test-intermediate.crt")).unwrap();
+        let root = SignerCert::from_file(&dir.join("test-root.crt")).unwrap();
+
+        // CA certs pass with no intermediates below them.
+        assert!(enforce_ca_constraints(&ica, 0).is_ok());
+        assert!(enforce_ca_constraints(&root, 0).is_ok());
+
+        // The leaf is an end-entity (cA=FALSE) — must be rejected as an issuer.
+        assert!(
+            enforce_ca_constraints(&leaf, 0).is_err(),
+            "end-entity leaf must not validate as a CA"
+        );
+
+        // The intermediate has pathLenConstraint:0 — one intermediate CA below it
+        // is a violation.
+        assert!(
+            enforce_ca_constraints(&ica, 1).is_err(),
+            "pathLenConstraint:0 must reject an intermediate CA below it"
+        );
+    }
 }
 
 /// Verify that `child` was signed by `issuer`'s public key.

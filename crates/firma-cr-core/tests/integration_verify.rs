@@ -317,6 +317,46 @@ fn verify_round_trip_cades() {
     assert!(report.signer_subject.is_some());
 }
 
+/// A -B-B CAdES carries no embedded revocation data. With the default policy it
+/// verifies; with `require_revocation` it must hard-fail (3f).
+#[test]
+#[ignore]
+fn verify_cades_require_revocation_hard_fails_without_data() {
+    let ca = ca_dir();
+    let leaf_crt = ca.join("test-leaf.crt");
+    let leaf_key = ca.join("test-leaf.key");
+    let chain_pem = ca.join("test-chain.pem");
+    let root_crt = ca.join("test-root.crt");
+    let payload = fixtures_dir().join("small.dat");
+
+    assert!(leaf_crt.exists(), "run tests/test_ca/gen-test-ca.sh first");
+
+    let cert = SignerCert::from_file(&leaf_crt).expect("leaf cert");
+    let chain = SignerCert::load_chain_from_pem(&chain_pem).expect("chain");
+    let chain_refs: Vec<&SignerCert> = chain.iter().collect();
+    let signer = SoftwareSigner::from_file(&leaf_key).expect("leaf key");
+    let data = std::fs::read(&payload).expect("read payload");
+    let cms_der = CadesBuilder::new(&data, HashAlgo::Sha256, &cert)
+        .include_chain(chain_refs)
+        .build(&signer)
+        .expect("build cms");
+    let root = SignerCert::from_file(&root_crt).expect("root cert");
+
+    // Default policy: -B-B (no revocation data) passes.
+    let lenient = verify::cms::verify_detached(&cms_der, &data, &root, Default::default())
+        .expect("verify_detached");
+    assert!(lenient.ok, "default policy should accept -B-B: {lenient:?}");
+
+    // require_revocation: the same signature must now fail.
+    let opts = verify::VerifyOptions { require_revocation: true, ..Default::default() };
+    let strict = verify::cms::verify_detached(&cms_der, &data, &root, opts)
+        .expect("verify_detached");
+    assert!(
+        !strict.ok,
+        "require_revocation must reject a signature with no revocation data: {strict:?}"
+    );
+}
+
 #[test]
 #[ignore]
 fn verify_cades_rejects_tampered_content() {

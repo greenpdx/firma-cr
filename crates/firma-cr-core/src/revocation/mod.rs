@@ -40,6 +40,7 @@ impl RevocationData {
 /// POST an OCSP request to a responder URL and return the raw
 /// `OCSPResponse` DER bytes.
 pub fn fetch_ocsp(responder_url: &str, request_der: &[u8]) -> Result<Vec<u8>> {
+    crate::net::require_web_scheme(responder_url).map_err(Error::Ocsp)?;
     log::info!("ocsp: POST {responder_url} ({} bytes)", request_der.len());
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -58,16 +59,14 @@ pub fn fetch_ocsp(responder_url: &str, request_der: &[u8]) -> Result<Vec<u8>> {
             resp.status()
         )));
     }
-    Ok(resp
-        .bytes()
-        .map_err(|e| Error::Ocsp(format!("read response: {e}")))?
-        .to_vec())
+    crate::net::read_capped(resp, crate::net::MAX_OCSP_BYTES).map_err(Error::Ocsp)
 }
 
 /// GET a CRL from a CDP URL and return the raw `CertificateList`
 /// DER bytes. Rejects PEM-encoded CRLs; the caller should
 /// pre-convert if needed.
 pub fn fetch_crl(cdp_url: &str) -> Result<Vec<u8>> {
+    crate::net::require_web_scheme(cdp_url).map_err(Error::Crl)?;
     log::info!("crl: GET {cdp_url}");
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -80,10 +79,7 @@ pub fn fetch_crl(cdp_url: &str) -> Result<Vec<u8>> {
     if !resp.status().is_success() {
         return Err(Error::Crl(format!("HTTP {} from CDP", resp.status())));
     }
-    let body = resp
-        .bytes()
-        .map_err(|e| Error::Crl(format!("read body: {e}")))?
-        .to_vec();
+    let body = crate::net::read_capped(resp, crate::net::MAX_CRL_BYTES).map_err(Error::Crl)?;
     if body.starts_with(b"-----BEGIN") {
         return Err(Error::Crl("PEM-encoded CRL not supported".into()));
     }
