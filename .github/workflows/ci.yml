@@ -27,10 +27,14 @@ jobs:
         run: cargo fmt --all -- --check
         continue-on-error: true
       - name: clippy (advisory)
-        run: cargo clippy --workspace --all-features --all-targets
+        run: cargo clippy --workspace --features agent --all-targets
         continue-on-error: true
+      # NB: not --all-features. The `test-signer` feature include_str!s generated
+      # fixtures (tests/test_ca/out/, created by gen-test-ca.sh) that aren't
+      # committed, and its tests are #[ignore] (run out-of-band). `agent` covers
+      # the unit + agent HTTP tests.
       - name: test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --features agent
 
   deny:
     name: cargo-deny (advisories · licenses · bans · sources)
