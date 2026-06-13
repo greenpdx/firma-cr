@@ -173,4 +173,11 @@ pub struct VerifyOptions {
     /// at the embedded `signingTime`. Default `None` =
     /// `SystemTime::now()`.
     pub validation_time: Option<std::time::SystemTime>,
+    /// Revocation policy. When `true`, a signature that carries **no** embedded
+    /// revocation data (OCSP/CRL) is a hard failure rather than a pass — set this
+    /// when verifying long-term `-LT`/`-LTA` signatures, where revocation
+    /// evidence is mandatory. Default `false` keeps `-B-B`/`-T` signatures (which
+    /// legitimately carry no revocation data) passing, and a *present-but-failing*
+    /// revocation check is always a hard failure regardless of this flag.
+    pub require_revocation: bool,
 }

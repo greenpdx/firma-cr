@@ -206,6 +206,11 @@ struct VerifyArgs {
     /// was valid at the embedded signingTime.
     #[arg(long)]
     validation_time: Option<String>,
+    /// Require embedded revocation data (OCSP/CRL): a signature with none is a
+    /// hard failure. Use when verifying long-term -LT/-LTA signatures where
+    /// revocation evidence is mandatory. Default: off (-B-B/-T pass without it).
+    #[arg(long)]
+    require_revocation: bool,
     /// Emit the verdict as JSON instead of the default human-readable
     /// pretty output. Schema mirrors the public VerifyReport struct.
     #[arg(long)]
@@ -656,6 +661,7 @@ fn run_verify(cmd: &VerifyCmd) -> firma_cr_core::Result<()> {
     let options = VerifyOptions {
         cert_internal: vopts.cert_internal,
         validation_time,
+        require_revocation: vopts.require_revocation,
     };
     let report = match cmd {
         VerifyCmd::Cms { content, .. } => {

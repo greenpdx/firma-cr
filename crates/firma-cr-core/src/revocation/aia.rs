@@ -75,6 +75,7 @@ pub fn ca_issuer_urls(cert: &SignerCert) -> Vec<String> {
 /// HTTP-GET one cert URL and return raw bytes (DER, PEM, or
 /// PKCS#7 — caller decides how to parse).
 pub fn fetch_issuer(url: &str) -> Result<Vec<u8>> {
+    crate::net::require_web_scheme(url).map_err(Error::CertParse)?;
     log::info!("aia: GET {url}");
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -90,10 +91,7 @@ pub fn fetch_issuer(url: &str) -> Result<Vec<u8>> {
             resp.status()
         )));
     }
-    Ok(resp
-        .bytes()
-        .map_err(|e| Error::CertParse(format!("read body: {e}")))?
-        .to_vec())
+    crate::net::read_capped(resp, crate::net::MAX_AIA_BYTES).map_err(Error::CertParse)
 }
 
 /// Walk `leaf`'s AIA chain upward, fetching each parent cert from

@@ -20,6 +20,7 @@ pub mod c14n;
 pub mod cades;
 pub mod cert;
 pub mod error;
+pub mod net;
 pub mod pades;
 pub mod signer;
 pub mod revocation;

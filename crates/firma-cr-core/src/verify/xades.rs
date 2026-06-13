@@ -314,6 +314,11 @@ fn verify_xml_inner(
         }
         revocation_verdict = Some(v);
     }
+    // Revocation policy: caller may require embedded revocation data to be present.
+    if opts.require_revocation && revocation_verdict.is_none() {
+        ok = false;
+        warnings.push("revocation data required (require_revocation) but none embedded".into());
+    }
 
     // ---- optional XAdES <ArchiveTimeStamp> validation ----
     let mut archive_timestamp_verdict: Option<tsa::TimestampVerdict> = None;

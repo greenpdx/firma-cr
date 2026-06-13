@@ -45,6 +45,50 @@ struct PlacementArg {
     page: usize,
 }
 
+/// Defense-in-depth validation of the webview-supplied input/output paths before
+/// they reach `std::fs`. The native file dialog already constrains interactive
+/// selection, but the command is reachable from the webview directly, so we
+/// re-check here: the input must be an existing regular `.pdf` file, and the
+/// output must name a `.pdf` under an existing directory (not a directory itself).
+/// This blocks reading non-regular files (devices/FIFOs) and writing into a
+/// non-existent/garbage location if a compromised webview invokes `sign_pdf`.
+fn validate_pdf_io(input_path: &str, output_path: &str) -> Result<(), String> {
+    let has_pdf_ext = |p: &str| {
+        std::path::Path::new(p)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+    };
+
+    if input_path.trim().is_empty() {
+        return Err("input path is empty".into());
+    }
+    if !has_pdf_ext(input_path) {
+        return Err("input must be a .pdf file".into());
+    }
+    let meta = std::fs::metadata(input_path).map_err(|e| format!("input PDF not readable: {e}"))?;
+    if !meta.is_file() {
+        return Err("input path is not a regular file".into());
+    }
+
+    if output_path.trim().is_empty() {
+        return Err("output path is empty".into());
+    }
+    if !has_pdf_ext(output_path) {
+        return Err("output must be a .pdf file".into());
+    }
+    let parent = std::path::Path::new(output_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| "output path has no directory".to_string())?;
+    if !parent.is_dir() {
+        return Err(format!("output directory does not exist: {}", parent.display()));
+    }
+    if std::path::Path::new(output_path).is_dir() {
+        return Err("output path is a directory".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn sign_pdf(
@@ -67,6 +111,8 @@ fn sign_pdf(
                 .to_string(),
         );
     }
+
+    validate_pdf_io(&input_path, &output_path)?;
 
     let input = std::fs::read(&input_path).map_err(|e| format!("read input PDF: {e}"))?;
 

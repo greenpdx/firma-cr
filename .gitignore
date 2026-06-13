@@ -1,2 +1,5 @@
 /target
 packaging/dist/
+
+# Audit signing private key — never commit. Only the public cert + signature ship.
+docs/audit/audit-cert.key

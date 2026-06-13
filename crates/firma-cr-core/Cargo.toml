@@ -30,6 +30,8 @@ const-oid = { version = "0.10.2", features = ["db"] }
 cryptoki = "0.12.0"
 der = "0.7"
 env_logger = "0.11.10"
+# OS CSPRNG for the RFC 3161 TSA nonce (must be unpredictable, not time-seeded).
+getrandom = "0.2"
 hex = "0.4.3"
 log = "0.4.30"
 lopdf = "0.40.0"
