@@ -2,8 +2,9 @@
 resolver = "2"
 members = ["crates/firma-cr-core", "crates/firma-cr-card"]
 # The Tauri GUI (gui/) is built separately (`cd gui && npm install && tauri
-# build`); keep its node/webkit toolchain out of the cargo workspace.
-exclude = ["gui/src-tauri"]
+# build`); keep its node/webkit toolchain out of the cargo workspace. The fuzz/
+# crate is nightly-only (libFuzzer/cargo-fuzz) and has its own [workspace].
+exclude = ["gui/src-tauri", "fuzz"]
 
 [profile.release]
 strip = false

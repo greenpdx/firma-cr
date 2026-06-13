@@ -1,5 +1,12 @@
 /target
 packaging/dist/
 
+# cargo-fuzz build output, crash artifacts, and the generated corpus.
+# Committed starter inputs live in fuzz/seeds/ instead.
+/fuzz/target
+/fuzz/artifacts
+/fuzz/corpus
+/fuzz/Cargo.lock
+
 # Audit signing private key — never commit. Only the public cert + signature ship.
 docs/audit/audit-cert.key

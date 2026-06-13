@@ -1,0 +1,42 @@
+[package]
+name = "firma-cr-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+authors = ["Shaun Savage <savages@crmep.com>"]
+license = "GPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+firma-cr-core = { path = "../crates/firma-cr-core" }
+
+# Own workspace root so the parent cargo workspace doesn't pull the (nightly-only,
+# sanitizer-instrumented) fuzz crate into normal `cargo build`/`cargo test`.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "c14n"
+path = "fuzz_targets/c14n.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cms"
+path = "fuzz_targets/cms.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pades"
+path = "fuzz_targets/pades.rs"
+test = false
+doc = false
+bench = false
