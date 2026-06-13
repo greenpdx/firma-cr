@@ -16,8 +16,22 @@ version = 2
 # Refuse to build against a crate version the registry has yanked.
 yanked = "deny"
 # Add a RUSTSEC id here (with a comment + justification) only to consciously
-# accept a finding we cannot yet remediate. Empty = every advisory fails.
-ignore = []
+# accept a finding we cannot yet remediate.
+ignore = [
+    # Marvin Attack — RSA timing side channel in the `rsa` crate. No fixed
+    # version exists yet (RustCrypto/RSA#626). Accepted because the
+    # private-key RSA operations in this stack are NOT done by this crate over
+    # a network-observable channel:
+    #   * Document signing is performed ON THE CARD (PSO:CDS); the private key
+    #     never enters the host and the `rsa` crate is not involved.
+    #   * The agent's only host-side RSA private-key op is decrypting the PIN
+    #     with an ephemeral, per-session env key, locally, in response to a
+    #     localhost request — not exposed to a remote timing observer.
+    #   * Signature *verification* uses RSA public-key ops, which the advisory
+    #     does not concern.
+    # Revisit when a constant-time `rsa` release ships.
+    "RUSTSEC-2023-0071",
+]
 
 # --- License policy ----------------------------------------------------------
 # The workspace is GPL-3.0-or-later; every dependency must be GPL-compatible.
@@ -39,6 +53,8 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "CC0-1.0",
+    # Permissive *data* license on the bundled webpki root-certificate set.
+    "CDLA-Permissive-2.0",
 ]
 
 # --- Dependency bans ---------------------------------------------------------
