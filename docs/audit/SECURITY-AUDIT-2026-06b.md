@@ -30,16 +30,16 @@ Status legend: **Fixed** (this pass) · **Mitigated/Documented** · **Deferred**
 |---|------|-----|---------|--------|
 | C1 | core | **Critical** | PAdES verifier didn't validate `/ByteRange` coverage → content appended after a signed PDF (or a carved ByteRange) verified as OK | **Fixed** — enforce r1=0, gap==`/Contents`, outermost coverage to EOF; checked arithmetic (`verify/pades.rs`); regression test added |
 | H1c | core | High | `/ByteRange` integer-overflow panic on hostile PDF (DoS) | **Fixed** — checked arithmetic (same commit as C1) |
-| H2c | core | High | XAdES signature wrapping: first-match element/ID resolution (substring scan, not a namespaced DOM) | **Deferred** — needs a namespace-aware DOM + unique-ID resolution; tracked. Affects XAdES verify only |
+| H2c | core | High | XAdES signature wrapping: first-match element/ID resolution (substring scan, not a namespaced DOM) | **Fixed** — require exactly one `<ds:Signature>` and reject duplicate `Id` values (references resolve uniquely) (`verify/xades.rs`). A full namespaced-DOM resolver remains a further hardening |
 | H1a | agent | High | Login rate-limiter keyed per-env → attacker mints envs to bypass and burn the card PIN counter | **Fixed** — global (process/card-scoped) throttle (`agent/http.rs`) |
 | H1d | driver | High | CA channel not MAC-probed before the PIN VERIFY | **Mitigated** — the new connect()-reads-cert-before-login order makes the (MAC-checked) cert read run before the PIN, probing the channel vs a passive MITM. Full fix (probe) needs a **context-preserving** SM command — *not* SELECT MF (loses cdynid context → 6A82). **Needs-card** |
 | H2d | driver | High | Card's static CA public key read from an **unsigned** EF (D004), no CMS signature check → a rogue card can supply its own key and derive the SM key (decrypt PIN) | **Needs-card** — requires verifying EF.CardSecurity's CMS signature against a pinned CSCA. Documented; inherent to CA-v1 without PACE/TA (attacker must get the user to insert a malicious card and enter their PIN) |
 | H3d | driver | High | RFC-5114 MODP DH (chipdoc path): no validation of the card's public value (small-subgroup/range) | **Fixed** — reject `{0,1,p-1}`/out-of-range card pub and Z (`crypto/dh.rs`) |
 | M1c | core | Med | SSRF: fetchers checked only the URL scheme, not the target IP | **Fixed** — block loopback/private/link-local/CGNAT/metadata/ULA (v4+v6), opt-out `FIRMA_CR_ALLOW_PRIVATE_FETCH` (`net.rs`) |
-| M2c | core | Med | No OCSP/CRL freshness check (`nextUpdate` ignored) → stale-"good" replay | **Deferred** — needs `validation_time` threaded into `validate_signer`; tracked |
-| M3c | core | Med | TSA client doesn't verify the response nonce | **Deferred** — well-mitigated (the imprint check already rejects tokens over different data); tracked |
+| M2c | core | Med | No OCSP/CRL freshness check (`nextUpdate` ignored) → stale-"good" replay | **Fixed** — reject stale "good" OCSP / stale CRL coverage (past nextUpdate), honoring listed revocations; `validation_time` threaded into `validate_signer` (`verify/revocation.rs`) |
+| M3c | core | Med | TSA client doesn't verify the response nonce | **Deferred** — well-mitigated (the imprint check in `verify_token` already rejects a token over different data); fragile to extract via the hand-rolled TLV walker — do it with a proper TSTInfo decoder |
 | M1k | card | Med | cryptoki-path PIN copy not actually zeroized (`.into()` reallocated) | **Fixed** — single `Box<str>` handed to `AuthPin` (`pkcs11_client.rs`) |
-| M2k | card | Med | Arbitrary unsigned `dlopen` of the module path | **Documented** — install the `.so` to a root-owned path; trust model in [`SECURITY.md`](../../SECURITY.md). (Pre-existing for the cryptoki path too) |
+| M2k | card | Med | Arbitrary unsigned `dlopen` of the module path | **Fixed (warn) + Documented** — warn when the module file is group/world-writable (`pkcs11_client.rs`); install root-owned. Trust model in [`SECURITY.md`](../../SECURITY.md) |
 | M3k | card | Med | `fcr_sign` retry could double-sign if `modulus_bits` under-reported | **Mitigated** — `fcr_modulus_bits` (ABI v2) reports the real size; the length-query doesn't sign |
 | M2a | agent | Med | No env-ownership check on add_file/build/download/get_certs; `download` fell back to first file | **Fixed** — reject unknown envs; exact-name download (`agent/http.rs`) |
 | M3a | agent | Med | `build` ignored `sign_cert`/`files` and signed all staged files | **Fixed** — sign exactly the named files; validate the handle (`agent/http.rs`) |
@@ -47,7 +47,9 @@ Status legend: **Fixed** (this pass) · **Mitigated/Documented** · **Deferred**
 | M1d | driver | Med | `FIRMA_CR_RECORD` wrote the **cleartext PIN** to disk on the legacy non-SM path | **Fixed** — redact VERIFY (INS=0x20) data in the recorder (`trace.rs`) |
 | M2d | driver | Med | DH ephemeral private key / `Z` not zeroized | **Fixed** — `Zeroizing` + wipe stack copy (`crypto/dh.rs`) |
 | M3d | driver | Med | `C_Logout` doesn't drop card-side auth / SM channel | **Deferred** — tracked; reset card on logout when no other session is authenticated |
-| L1–L5 | core/driver | Low/Info | content-type signed attr not checked; ESS cert-binding not verified; chain validity-window only checked with `validation_time`; leaf keyUsage/EKU not enforced; hand-rolled c14n; replay/record env-gated in prod | **Deferred** — see agent reports; low risk |
+| L1 | core | Low | content-type signed attr not checked | **Fixed** — required and compared to eContentType (`verify/cms.rs`) |
+| L4 | core | Low | leaf keyUsage not enforced | **Fixed** — leaf keyUsage, when present, must permit digitalSignature/nonRepudiation (`verify/chain.rs`) |
+| L2/L3/L5 | core | Low/Info | ESS cert-binding not verified; chain validity-window only checked with `validation_time`; hand-rolled c14n | **Deferred** — L3 is a behavioral/product choice (long-term validation); L5 needs a vetted c14n lib; low risk |
 
 ## What was verified sound (coverage)
 CMS signedAttrs + messageDigest binding; TSA token verification; embedded OCSP/CRL
@@ -61,19 +63,25 @@ the localhost + interactive-PIN IPC boundary.
 
 ## Remediation
 Fixes landed on the `audit-fixes` branch of each repo:
-- `firma-cr`: C1/H1c, H1a, M1c, M1k, M2a, M3a (PR for review).
-- `firma-cr-engine`: H3d, M1d, M2d (PR for review).
-Each fix has a focused commit; new tests: PAdES appended-content rejection, SSRF
-classifier/blocklist.
+- `firma-cr`: C1/H1c, H1a, H2c, M1c, M2c, M1k, M2k, M2a, M3a, L1, L4.
+- `firma-cr-engine`: H3d, M1d, M2d.
+Each fix has a focused commit; new/updated tests: PAdES appended-content
+rejection, SSRF classifier/blocklist; all 33 gated verify round-trips still pass.
 
 ## Residual risk & recommended follow-ups
-1. **H2d/H1d (driver, Needs-card):** verify EF.CardSecurity's CMS signature
-   against a pinned CSCA and add a context-preserving MAC probe before the PIN —
-   the only way to fully stop a rogue-card PIN harvest. Validate on hardware.
-2. **H2c:** replace the hand-rolled XAdES element/ID resolution with a
-   namespace-aware DOM (signature-wrapping resistance).
-3. **M2c/M3c:** OCSP/CRL `nextUpdate` freshness and TSA nonce verification.
-4. **M3d / M2k:** card-side logout teardown; lock down module-path loading.
+**Needs hardware (driver):**
+1. **H2d/H1d:** verify EF.CardSecurity's CMS signature against a pinned CSCA and
+   add a *context-preserving* MAC probe before the PIN (not SELECT MF — loses the
+   cdynid context → 6A82) — the only complete defense against a rogue-card PIN
+   harvest. Must be validated on a card.
+2. **M3d:** `C_Logout` should drop card-side authentication.
+
+**Non-card, deferred (low value / behavioral / large):**
+3. **M3c:** verify the TSA response nonce (well-mitigated by the imprint check;
+   needs a proper TSTInfo decoder).
+4. **L3:** apply the cert validity-window by default (a long-term-validation
+   product decision). **L5:** replace the hand-rolled Exclusive C14N with a vetted
+   implementation. **L2:** verify the ESS signing-certificate binding.
 
 ## Certification
 The finalized report is signed with the audit certificate:
