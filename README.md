@@ -4,7 +4,7 @@ Open-source digital-signature toolkit for the Costa Rica BCCR **Firma Digital**
 smart card — a Firmador / SCManager replacement. Produces ETSI **PAdES** (PDF),
 **CAdES** (CMS) and **XAdES** (XML) signatures, verifies them, and ships a desktop
 GUI plus a GAUDI-compatible local web-signing agent. Works with **any** PKCS#11
-module (our `firma-cr-pkcs11` driver, the official Idopte driver, OpenSC, …).
+module (`libfirma_cr_pkcs11.so`, the official Idopte driver, OpenSC, …).
 
 License: GPL-3.0-or-later · Author: Shaun Savage `<savages@crmep.com>`
 
@@ -19,9 +19,9 @@ License: GPL-3.0-or-later · Author: Shaun Savage `<savages@crmep.com>`
 | `scripts/tester/` | One-shot RPi/Debian setup, build, and stack-check scripts |
 | [`SECURITY.md`](SECURITY.md) | Threat model + vulnerability reporting |
 
-The PKCS#11 **driver** (`libfirma_cr_pkcs11.so`) that talks to the card lives in a
-separate repo (`firma-cr-engine`); this repo drives whatever PKCS#11 module you
-point it at.
+The PKCS#11 **driver** that talks to the card is `libfirma_cr_pkcs11.so`
+(default location `/usr/lib/firma-cr/libfirma_cr_pkcs11.so`); this repo drives
+whatever PKCS#11 module you point it at.
 
 ## Building
 
@@ -41,8 +41,7 @@ sudo systemctl enable --now pcscd
 
 You also need a PKCS#11 driver installed where the tools look for it
 (`/usr/lib/firma-cr/libfirma_cr_pkcs11.so` by default; override with `--module`
-or `FIRMA_CR_MODULE`). Build/install it from `firma-cr-engine`, or use any
-conformant module (e.g. OpenSC).
+or `FIRMA_CR_MODULE`), or use any conformant module (e.g. OpenSC).
 
 ### CLI + library
 
