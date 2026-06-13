@@ -49,27 +49,32 @@ pub struct TokenSession {
 }
 
 impl TokenSession {
-    /// `connect` / `begin_session`: open the PKCS#11 module + the card session.
+    /// `connect` / `begin_session`: open the PKCS#11 module + the card session,
+    /// and read the (public) signing certificate — BEFORE any PIN/VERIFY.
     pub fn connect(module_path: &Path) -> Result<Self, TokenError> {
         let client =
             CardClient::open(module_path, None).map_err(|e| TokenError::Connect(e.to_string()))?;
-        Ok(Self { client, cert_der: None, cert: None, key: None })
-    }
-
-    /// `login`: verify the PIN, then read the signing cert + key.
-    pub fn login(&mut self, pin: &str) -> Result<(), TokenError> {
-        self.client.login(pin).map_err(|e| TokenError::Login(e.to_string()))?;
-        let der = self
-            .client
+        // Read the cert here, before login. It is public (no PIN), and doing it now
+        // keeps the post-VERIFY card sequence down to read_signing_key → C_Sign,
+        // exactly like the working CLI. A find_objects(CERTIFICATE) *after* VERIFY
+        // re-SELECTs the applet and clears the card's PIN security status, which
+        // made PSO:CDS fail with SW=6985 ("conditions of use not satisfied"). The
+        // clean-room spec also reads the cert (step 5) before the VERIFY (step 6).
+        let der = client
             .read_certificate()
             .map_err(|e| TokenError::Card(e.to_string()))?;
         let cert = SignerCert::from_der(der.clone()).map_err(|e| TokenError::Card(e.to_string()))?;
+        Ok(Self { client, cert_der: Some(der), cert: Some(cert), key: None })
+    }
+
+    /// `login`: verify the PIN, then read the signing key — and nothing else
+    /// touches the card before C_Sign, so the PIN status holds at PSO:CDS.
+    pub fn login(&mut self, pin: &str) -> Result<(), TokenError> {
+        self.client.login(pin).map_err(|e| TokenError::Login(e.to_string()))?;
         let key = self
             .client
             .read_signing_key()
             .map_err(|e| TokenError::Card(e.to_string()))?;
-        self.cert_der = Some(der);
-        self.cert = Some(cert);
         self.key = Some(key);
         Ok(())
     }
@@ -82,18 +87,27 @@ impl TokenSession {
     /// probe a GUI runs first). The cert reads over the SM channel (CA, no PIN).
     pub fn info(&self) -> Result<String, TokenError> {
         let mut out = self.client.info().map_err(|e| TokenError::Card(e.to_string()))?;
-        if let Ok(der) = self.client.read_certificate() {
-            if let Ok(cert) = SignerCert::from_der(der) {
-                let (not_before, not_after) = cert.validity_window();
-                out.push_str(&format!(
-                    "\n\nSigning certificate\n  subject: {}\n  issuer:  {}\n  serial:  {}\n  valid:   {} .. {}",
-                    cert.subject_string(),
-                    cert.issuer_string(),
-                    cert.serial_hex(),
-                    not_before,
-                    not_after,
-                ));
-            }
+        // Prefer the cert cached at connect-time; only read from the card if we
+        // don't have it. Avoids a redundant find_objects(CERTIFICATE) that, run
+        // after VERIFY, would clear the card's PIN status (see `connect`).
+        let cert = match &self.cert {
+            Some(c) => Some(c.clone()),
+            None => self
+                .client
+                .read_certificate()
+                .ok()
+                .and_then(|der| SignerCert::from_der(der).ok()),
+        };
+        if let Some(cert) = cert {
+            let (not_before, not_after) = cert.validity_window();
+            out.push_str(&format!(
+                "\n\nSigning certificate\n  subject: {}\n  issuer:  {}\n  serial:  {}\n  valid:   {} .. {}",
+                cert.subject_string(),
+                cert.issuer_string(),
+                cert.serial_hex(),
+                not_before,
+                not_after,
+            ));
         }
         Ok(out)
     }
