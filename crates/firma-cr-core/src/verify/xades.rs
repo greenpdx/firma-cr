@@ -110,6 +110,13 @@ fn verify_xml_inner(
     let xml_str = std::str::from_utf8(xml)
         .map_err(|_| Error::Xml("input XML not UTF-8".into()))?;
 
+    // Signature-wrapping resistance: require exactly one <ds:Signature> element.
+    // More than one is the classic XSW substrate (verify one, app consumes another).
+    if count_signature_elements(xml_str) != 1 {
+        return Err(Error::Xades(
+            "expected exactly one <ds:Signature> element (possible signature wrapping)".into(),
+        ));
+    }
     let sig_span = locate_element(xml_str, "ds:Signature")
         .ok_or_else(|| Error::Xades("no <ds:Signature> element".into()))?;
     let signature_xml = &xml_str[sig_span.0..sig_span.1];
@@ -307,6 +314,7 @@ fn verify_xml_inner(
             &intermediates,
             trust_root,
             opts.cert_internal,
+            opts.validation_time.unwrap_or_else(std::time::SystemTime::now),
         );
         if !v.ok {
             ok = false;
@@ -656,6 +664,27 @@ fn recompute_reference_digest(
 /// `<tag …>…</tag>` in the haystack. Returns the open `<` through the
 /// final `>` of the closing tag. Simple — assumes the tag isn't
 /// nested with same-name children.
+/// Count `<ds:Signature>` *elements* — not `<ds:SignatureValue>` /
+/// `<ds:SignatureMethod>`, which share the prefix. Matches `<ds:Signature`
+/// followed by a tag-terminating character.
+fn count_signature_elements(s: &str) -> usize {
+    let pat = "<ds:Signature";
+    let bytes = s.as_bytes();
+    let mut n = 0;
+    let mut from = 0;
+    while let Some(i) = s[from..].find(pat) {
+        let after = from + i + pat.len();
+        if matches!(
+            bytes.get(after).copied(),
+            Some(b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/')
+        ) {
+            n += 1;
+        }
+        from = after;
+    }
+    n
+}
+
 fn locate_element(s: &str, tag: &str) -> Option<(usize, usize)> {
     let open_pat = format!("<{tag}");
     let open_idx = s.find(&open_pat)?;
@@ -670,6 +699,11 @@ fn locate_element(s: &str, tag: &str) -> Option<(usize, usize)> {
 /// tag. Independent of the element's tag name.
 fn locate_element_by_id(s: &str, id: &str) -> Option<(usize, usize)> {
     let needle = format!("Id=\"{id}\"");
+    // Reject duplicate IDs: a reference must resolve to a UNIQUE element. Two
+    // elements sharing the Id is the signature-wrapping substrate — fail closed.
+    if s.matches(&needle).count() != 1 {
+        return None;
+    }
     let attr_idx = s.find(&needle)?;
     // Walk backwards to the nearest '<' — that's the opening of our
     // element.

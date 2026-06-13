@@ -36,6 +36,8 @@ const OID_SIGNED_DATA: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.2");
 const OID_MESSAGE_DIGEST: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.4");
+const OID_CONTENT_TYPE: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.3");
 const OID_SIGNING_TIME: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.5");
 const OID_SIGNATURE_TIME_STAMP_TOKEN: ObjectIdentifier =
@@ -248,6 +250,39 @@ fn verify_one_signer(
         });
     }
 
+    // content-type signed attribute must be present and equal the encapsulated
+    // eContentType (RFC 5652 §5.4). Compare DER bytes to dodge const_oid version
+    // skew between crates.
+    let ct_attr_der = find_attr(signed_attrs, &OID_CONTENT_TYPE)
+        .and_then(|a| a.values.as_slice().first())
+        .and_then(|v| v.to_der().ok());
+    if ct_attr_der != sd.encap_content_info.econtent_type.to_der().ok() {
+        return Ok(SignerVerdict {
+            ok: false,
+            signer_subject: Some(signer.subject_string()),
+            signing_time: extract_signing_time(signed_attrs),
+            has_timestamp: has_timestamp(si.unsigned_attrs.as_ref()),
+            timestamp: None,
+            revocation: None,
+            archive_timestamp: None,
+            warnings: vec!["content-type signed attr missing or != eContentType".into()],
+        });
+    }
+
+    // Signer (leaf) cert must be allowed to sign (keyUsage, when present).
+    if let Err(e) = chain::check_leaf_key_usage(signer) {
+        return Ok(SignerVerdict {
+            ok: false,
+            signer_subject: Some(signer.subject_string()),
+            signing_time: extract_signing_time(signed_attrs),
+            has_timestamp: has_timestamp(si.unsigned_attrs.as_ref()),
+            timestamp: None,
+            revocation: None,
+            archive_timestamp: None,
+            warnings: vec![format!("{e}")],
+        });
+    }
+
     // Signer cert validity window: only applied when the caller
     // supplies an explicit validation_time. When None we trust
     // the embedded signingTime + timestamp evidence and skip the
@@ -334,6 +369,7 @@ fn verify_one_signer(
                 &intermediate_refs,
                 trust_root,
                 opts.cert_internal,
+                opts.validation_time.unwrap_or_else(std::time::SystemTime::now),
             );
             if !v.ok {
                 ok = false;

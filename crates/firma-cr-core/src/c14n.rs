@@ -41,7 +41,63 @@ use crate::error::{Error, Result};
 /// Canonicalize an XML fragment using Exclusive C14N 1.0.
 /// Returns the octet stream (UTF-8 bytes) the signer feeds into the
 /// hash.
+/// Fail closed on the adversarial-XML constructs canonicalization must not paper
+/// over: a DTD/`DOCTYPE` or entity declaration (the XXE / billion-laughs vector —
+/// without a DTD no custom entity can be defined), and any non-predefined entity
+/// reference. Only the five predefined entities and numeric character references
+/// are allowed; `&` inside comments and CDATA is literal and skipped. This closes
+/// the "do NOT use for adversarial XML inputs" gap the hand-rolled c14n had.
+fn reject_unsafe_xml(xml: &[u8]) -> Result<()> {
+    let contains = |pat: &[u8]| xml.windows(pat.len()).any(|w| w == pat);
+    if contains(b"<!DOCTYPE") || contains(b"<!ENTITY") {
+        return Err(Error::Xml(
+            "DTD/DOCTYPE or entity declaration not allowed in signed XML".into(),
+        ));
+    }
+    let n = xml.len();
+    let mut i = 0;
+    while i < n {
+        if xml[i..].starts_with(b"<!--") {
+            // Skip to the end of the comment; `&` inside is literal.
+            i = xml[i + 4..]
+                .windows(3)
+                .position(|w| w == b"-->")
+                .map(|p| i + 4 + p + 3)
+                .unwrap_or(n);
+            continue;
+        }
+        if xml[i..].starts_with(b"<![CDATA[") {
+            i = xml[i + 9..]
+                .windows(3)
+                .position(|w| w == b"]]>")
+                .map(|p| i + 9 + p + 3)
+                .unwrap_or(n);
+            continue;
+        }
+        if xml[i] == b'&' {
+            let rest = &xml[i + 1..];
+            let semi = rest
+                .iter()
+                .position(|&b| b == b';')
+                .ok_or_else(|| Error::Xml("unterminated entity reference".into()))?;
+            let name = &rest[..semi];
+            let allowed = matches!(name, b"amp" | b"lt" | b"gt" | b"quot" | b"apos")
+                || name.first() == Some(&b'#'); // numeric character reference
+            if !allowed {
+                return Err(Error::Xml(
+                    "non-predefined XML entity reference not allowed in signed XML".into(),
+                ));
+            }
+            i += 1 + semi + 1;
+            continue;
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
 pub fn excl_c14n(xml: &[u8]) -> Result<Vec<u8>> {
+    reject_unsafe_xml(xml)?;
     let reader = EventReader::new(xml);
     let mut out = Vec::with_capacity(xml.len() + 64);
     // Stack of "namespace prefixes rendered at each open element" —
@@ -289,5 +345,62 @@ mod tests {
     #[test]
     fn comments_dropped() {
         assert_eq!(c14n("<a><!-- x --></a>"), "<a></a>");
+    }
+
+    // ---- fail-closed guards against adversarial XML ----
+
+    #[test]
+    fn rejects_doctype() {
+        assert!(excl_c14n(b"<!DOCTYPE a><a/>").is_err());
+    }
+
+    #[test]
+    fn rejects_entity_declaration_and_xxe() {
+        // billion-laughs / XXE substrate: declaring entities requires a DTD.
+        let x = br#"<!DOCTYPE a [ <!ENTITY x "expanded"> ]><a>&x;</a>"#;
+        assert!(excl_c14n(x).is_err());
+    }
+
+    #[test]
+    fn rejects_custom_entity_reference() {
+        assert!(excl_c14n(b"<a>&xxe;</a>").is_err());
+    }
+
+    #[test]
+    fn allows_predefined_and_numeric_entities() {
+        assert!(excl_c14n("<a>&amp; &lt; &gt; &#169; &#xA9;</a>".as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn ampersand_inside_cdata_does_not_trip_guard() {
+        // `&` (and even `&custom;`) inside CDATA is literal — the guard must skip
+        // it rather than reject the whole document.
+        assert!(excl_c14n("<a><![CDATA[ a & b &custom; ]]></a>".as_bytes()).is_ok());
+    }
+
+    // ---- W3C Exclusive C14N 1.0 normative behaviors ----
+
+    #[test]
+    fn exclusive_drops_unused_ancestor_namespace() {
+        // `unused` is declared on the ancestor but visibly utilized by no element
+        // in the node-set → Exclusive C14N must NOT render it; only `a` (used by
+        // a:b) survives. This is the defining property of *exclusive* c14n.
+        let input = r#"<root xmlns:unused="urn:unused"><a:b xmlns:a="urn:a">t</a:b></root>"#;
+        let out = c14n(input);
+        assert!(!out.contains("unused"), "exclusive c14n must drop the unused ns: {out}");
+        assert!(out.contains(r#"xmlns:a="urn:a""#), "used ns must be kept: {out}");
+    }
+
+    #[test]
+    fn canonical_form_is_idempotent() {
+        // The canonical form is a fixed point: canonicalizing it again is identity.
+        for x in [
+            r#"<?xml version="1.0"?><r z="1" a="2"><c/></r>"#,
+            r#"<ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:Reference URI=""></ds:Reference></ds:SignedInfo>"#,
+        ] {
+            let once = c14n(x);
+            let twice = c14n(&once);
+            assert_eq!(once, twice, "c14n not idempotent for input: {x}");
+        }
     }
 }

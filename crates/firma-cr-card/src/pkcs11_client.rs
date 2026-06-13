@@ -65,6 +65,27 @@ type FcrSign = unsafe extern "C" fn(
     *mut c_ulong,
 ) -> CkRv;
 
+/// Warn (don't fail) if the module to be `dlopen`ed is group/world-writable —
+/// a local attacker who can replace it gets code execution in the signing process
+/// next to the PIN. Install the driver root-owned (e.g. 0644 under /usr/lib).
+#[cfg(unix)]
+fn warn_if_module_writable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mode = meta.permissions().mode();
+        if mode & 0o022 != 0 {
+            log::warn!(
+                "pkcs11: module {} is group/world-writable (mode {:o}); a local attacker \
+                 could replace the signing driver — install it root-owned (0644/0755)",
+                path.display(),
+                mode & 0o777
+            );
+        }
+    }
+}
+#[cfg(not(unix))]
+fn warn_if_module_writable(_path: &Path) {}
+
 fn ck(rv: CkRv, what: &str) -> Result<()> {
     if rv == CKR_OK {
         Ok(())
@@ -212,6 +233,7 @@ impl CardClient {
     /// path. `slot_idx` selects the slot (first present token if `None`).
     pub fn open(module_path: &Path, slot_idx: Option<usize>) -> Result<Self> {
         log::info!("pkcs11: loading module {}", module_path.display());
+        warn_if_module_writable(module_path);
         if let Some(m) = MacroState::try_open(module_path, slot_idx)? {
             return Ok(Self { backend: Backend::Macro(m) });
         }
@@ -304,11 +326,11 @@ impl CardClient {
         match &mut self.backend {
             Backend::Macro(m) => m.login(pin),
             Backend::Pkcs11 { session, .. } => {
-                // PIN hygiene: keep our intermediate copy in a `Zeroizing` buffer so
-                // it is wiped from the heap when this scope ends, even if `into()`
-                // reallocates. `AuthPin` (secrecy::SecretString) zeroizes its own copy.
-                let pin = Zeroizing::new(pin.to_string());
-                let auth = AuthPin::new(pin.as_str().into());
+                // PIN hygiene: hand `AuthPin` (secrecy::SecretString, which zeroizes
+                // on drop) a single freshly-allocated copy and keep no other. The
+                // previous `Zeroizing::new(pin.to_string())` + `.as_str().into()`
+                // made a *second*, un-zeroized `String`/`Box<str>` via reallocation.
+                let auth = AuthPin::new(Box::<str>::from(pin));
                 session.login(UserType::User, Some(&auth))?;
                 log::info!("pkcs11: C_Login OK");
                 Ok(())
