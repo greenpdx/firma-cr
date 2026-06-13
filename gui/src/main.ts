@@ -165,8 +165,11 @@ document.querySelectorAll<HTMLButtonElement>(".tab").forEach((t) =>
 type Method = "pkcs11" | "pkcs12";
 const CFG_KEY = "firma-cr.config";
 let cfg = loadConfig();
+/// The BCCR-run RFC 3161 TSA; pre-filled so enabling the timestamp toggle works
+/// with no typing. (Documented in firma-cr-analysis/docs/05.)
+const BCCR_TSA_URL = "https://tsa.firmadigital.go.cr/tsa";
 function loadConfig(): { method: Method; module: string; p12: string; tsaEnabled: boolean; tsa: string } {
-  const defaults = { method: "pkcs11" as Method, module: "", p12: "", tsaEnabled: false, tsa: "" };
+  const defaults = { method: "pkcs11" as Method, module: "", p12: "", tsaEnabled: false, tsa: BCCR_TSA_URL };
   try {
     const raw = localStorage.getItem(CFG_KEY);
     if (raw) return { ...defaults, ...JSON.parse(raw) };
