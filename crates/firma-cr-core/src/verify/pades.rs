@@ -20,11 +20,18 @@ pub fn verify_pdf(
     trust_root: &SignerCert,
     opts: VerifyOptions,
 ) -> Result<VerifyReport> {
-    let (byterange_data, cms_der) = extract_sig_payload(pdf)?;
+    let (byterange_data, cms_der, sig_cov_end) = extract_sig_payload(pdf)?;
     let mut report = verify_cms::verify_detached(&cms_der, &byterange_data, trust_root, opts)?;
 
     // ---- PAdES-LTA — embedded /Type /DocTimeStamp ----
-    if let Some((dts_br_data, dts_token_der)) = extract_doctimestamp_payload(pdf)? {
+    // Coverage policy (defeats appended-content forgery): the outermost coverage
+    // must reach EOF. A DocTimeStamp is an incremental update appended after the
+    // main signature; if present it must cover the whole file (enforced in the
+    // extractor), and because it cryptographically spans the main signature's
+    // bytes it also pins them. If there is NO DocTimeStamp, the main signature
+    // itself must cover to EOF — otherwise unsigned content has been appended.
+    let dts = extract_doctimestamp_payload(pdf)?;
+    if let Some((dts_br_data, dts_token_der)) = dts {
         let verdict = crate::verify::tsa::verify_token(
             &dts_token_der,
             &dts_br_data,
@@ -38,6 +45,12 @@ pub fn verify_pdf(
                 .push("PDF DocTimeStamp failed verification".into());
         }
         report.archive_timestamp = Some(verdict);
+    } else if sig_cov_end != pdf.len() {
+        report.ok = false;
+        report.warnings.push(
+            "PDF has unsigned content appended after the signature (ByteRange does not reach EOF)"
+                .into(),
+        );
     }
 
     // If the CMS already carried `id-aa-ets-revocationValues` and
@@ -220,11 +233,57 @@ fn deref_stream_bytes(doc: &Document, o: &lopdf::Object) -> Option<Vec<u8>> {
 /// bytes and return `(byterange_slice_concat, cms_der)`.
 ///
 /// This is the byte-level inverse of `pades::sign_pdf`'s patching.
-fn extract_sig_payload(pdf: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
-    // Find the `/ByteRange [` opener; the four numbers that follow
-    // are space-separated and terminated by `]`.
+fn extract_sig_payload(pdf: &[u8]) -> Result<(Vec<u8>, Vec<u8>, usize)> {
+    // Locate the signature's /Contents<...> hex slot first; the /ByteRange must
+    // exclude exactly this slot and cover everything else. PDFs also use
+    // `/Contents` as a page key (`/Contents N 0 R`); the signature dict has a
+    // literal hex string immediately after, so match `/Contents<`.
+    let (c_open, c_close) = find_contents_hex(pdf, 0)?;
+
+    // Parse the four /ByteRange ints (first /ByteRange = the main signature).
+    let nums = parse_byterange(pdf, 0)?;
+    // Enforce the PAdES coverage invariants against the located /Contents slot
+    // and return the end offset the signature covers to.
+    let cov_end = validate_byterange(&nums, pdf.len(), c_open, c_close)?;
+    let (_, r1_len, r2_off, r2_len) = (nums[0], nums[1], nums[2], nums[3]);
+
+    let mut byterange = Vec::with_capacity(r1_len + r2_len);
+    byterange.extend_from_slice(&pdf[0..r1_len]);
+    byterange.extend_from_slice(&pdf[r2_off..r2_off + r2_len]);
+
+    let hex_str = std::str::from_utf8(&pdf[c_open + 1..c_close])
+        .map_err(|_| Error::Pdf("/Contents body not UTF-8".into()))?;
+    // The CMS is left-justified inside the placeholder; trailing zeros are PAdES
+    // padding — trim them before decoding.
+    let trimmed = trim_trailing_zero_pairs(hex_str);
+    let cms_der = hex::decode(trimmed)
+        .map_err(|e| Error::Pdf(format!("/Contents hex decode: {e}")))?;
+
+    Ok((byterange, cms_der, cov_end))
+}
+
+/// Find the `/Contents<hex>` slot at or after `from`, returning the byte index
+/// of the opening `<` and the closing `>`.
+fn find_contents_hex(pdf: &[u8], from: usize) -> Result<(usize, usize)> {
+    let c_tag = b"/Contents<";
+    let c_idx = find_in(&pdf[from..], c_tag)
+        .map(|i| i + from)
+        .ok_or_else(|| Error::Pdf("no /Contents<...> hex string in PDF".into()))?;
+    let c_open = c_idx + c_tag.len() - 1; // index of `<`
+    let c_close = pdf[c_open + 1..]
+        .iter()
+        .position(|&b| b == b'>')
+        .ok_or_else(|| Error::Pdf("/Contents '>' not found".into()))?
+        + c_open
+        + 1;
+    Ok((c_open, c_close))
+}
+
+/// Parse the four `/ByteRange [a b c d]` integers at or after `from`.
+fn parse_byterange(pdf: &[u8], from: usize) -> Result<[usize; 4]> {
     let br_tag = b"/ByteRange";
-    let br_idx = find_in(pdf, br_tag)
+    let br_idx = find_in(&pdf[from..], br_tag)
+        .map(|i| i + from)
         .ok_or_else(|| Error::Pdf("no /ByteRange in PDF".into()))?;
     let br_open = pdf[br_idx + br_tag.len()..]
         .iter()
@@ -248,40 +307,43 @@ fn extract_sig_payload(pdf: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     if nums.len() != 4 {
         return Err(Error::Pdf("/ByteRange must have 4 ints".into()));
     }
+    Ok([nums[0], nums[1], nums[2], nums[3]])
+}
+
+/// Enforce the PAdES `/ByteRange` coverage invariants against the located
+/// `/Contents` slot (`c_open` = index of `<`, `c_close` = index of `>`) and
+/// return the offset the signature covers to (`r2_off + r2_len`). All arithmetic
+/// is checked. The invariants pin the signed bytes to "the whole document except
+/// this signature's own /Contents value", which defeats the classic PAdES
+/// added-content / carved-ByteRange forgery (a crafted ByteRange that leaves an
+/// attacker region outside the signed span, or that stops short of EOF).
+fn validate_byterange(nums: &[usize; 4], pdf_len: usize, c_open: usize, c_close: usize) -> Result<usize> {
     let (r1_off, r1_len, r2_off, r2_len) = (nums[0], nums[1], nums[2], nums[3]);
-    if r1_off + r1_len > pdf.len() || r2_off + r2_len > pdf.len() {
+    let r1_end = r1_off
+        .checked_add(r1_len)
+        .ok_or_else(|| Error::Pdf("/ByteRange range 1 overflow".into()))?;
+    let r2_end = r2_off
+        .checked_add(r2_len)
+        .ok_or_else(|| Error::Pdf("/ByteRange range 2 overflow".into()))?;
+    if r1_off != 0 {
+        return Err(Error::Pdf("/ByteRange must start at offset 0".into()));
+    }
+    // Range 1 ends right after the `<`; range 2 starts at the `>`; so the only
+    // bytes excluded from coverage are exactly the /Contents hex value.
+    if r1_end != c_open + 1 {
+        return Err(Error::Pdf(
+            "/ByteRange range 1 does not end at the /Contents value (carved ByteRange?)".into(),
+        ));
+    }
+    if r2_off != c_close {
+        return Err(Error::Pdf(
+            "/ByteRange range 2 does not resume after the /Contents value (carved ByteRange?)".into(),
+        ));
+    }
+    if r2_end > pdf_len {
         return Err(Error::Pdf("/ByteRange exceeds PDF length".into()));
     }
-
-    let mut byterange = Vec::with_capacity(r1_len + r2_len);
-    byterange.extend_from_slice(&pdf[r1_off..r1_off + r1_len]);
-    byterange.extend_from_slice(&pdf[r2_off..r2_off + r2_len]);
-
-    // Find the /Contents<...> hex string. PDFs also use `/Contents`
-    // as a page-dict key pointing at an indirect ref to the content
-    // stream (`/Contents N 0 R`); the signature dict instead has a
-    // literal hex string immediately after. Match `/Contents<` so
-    // we land on the right one.
-    let c_tag = b"/Contents<";
-    let c_idx = find_in(pdf, c_tag)
-        .ok_or_else(|| Error::Pdf("no /Contents<...> hex string in PDF".into()))?;
-    let c_open = c_idx + c_tag.len() - 1;
-    let c_close = pdf[c_open + 1..]
-        .iter()
-        .position(|&b| b == b'>')
-        .ok_or_else(|| Error::Pdf("/Contents '>' not found".into()))?
-        + c_open
-        + 1;
-    let hex_str = std::str::from_utf8(&pdf[c_open + 1..c_close])
-        .map_err(|_| Error::Pdf("/Contents body not UTF-8".into()))?;
-    // The CMS is left-justified inside the placeholder; trailing
-    // zeros may be PAdES padding. Strip after we hit our own
-    // end-of-CMS heuristic (last non-zero pair).
-    let trimmed = trim_trailing_zero_pairs(hex_str);
-    let cms_der = hex::decode(trimmed)
-        .map_err(|e| Error::Pdf(format!("/Contents hex decode: {e}")))?;
-
-    Ok((byterange, cms_der))
+    Ok(r2_end)
 }
 
 fn find_in(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -302,52 +364,22 @@ fn extract_doctimestamp_payload(pdf: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>
     // accounting for the inner `<...>` /Contents string. Easier path:
     // scan from dts_pos for /ByteRange and /Contents; both are
     // unique within the dict because we wrote them ourselves.
-    let tail = &pdf[dts_pos..];
-
-    // /ByteRange[N N N N]
-    let br_tag = b"/ByteRange[";
-    let br_open_rel = find_in(tail, br_tag).ok_or_else(|| {
-        Error::Pdf("/Type/DocTimeStamp: /ByteRange not found".into())
-    })?;
-    let br_body_start = dts_pos + br_open_rel + br_tag.len();
-    let br_body_end_rel = pdf[br_body_start..]
-        .iter()
-        .position(|&b| b == b']')
-        .ok_or_else(|| Error::Pdf("/Type/DocTimeStamp: /ByteRange ']' not found".into()))?;
-    let body = std::str::from_utf8(&pdf[br_body_start..br_body_start + br_body_end_rel])
-        .map_err(|_| Error::Pdf("/Type/DocTimeStamp: ByteRange body not UTF-8".into()))?;
-    let nums: Vec<usize> = body
-        .split_whitespace()
-        .map(|s| s.parse::<usize>())
-        .collect::<std::result::Result<_, _>>()
-        .map_err(|e| Error::Pdf(format!("DocTimeStamp /ByteRange parse: {e}")))?;
-    if nums.len() != 4 {
+    // The DocTimeStamp's /ByteRange and /Contents come after its dict marker.
+    let (c_open, c_close) = find_contents_hex(pdf, dts_pos)?;
+    let nums = parse_byterange(pdf, dts_pos)?;
+    let cov_end = validate_byterange(&nums, pdf.len(), c_open, c_close)?;
+    // The DocTimeStamp is the outermost coverage: it MUST extend to EOF, so no
+    // unsigned content can hide after it.
+    if cov_end != pdf.len() {
         return Err(Error::Pdf(
-            "/Type/DocTimeStamp: /ByteRange must have 4 ints".into(),
+            "/Type/DocTimeStamp does not cover to end of file (trailing unsigned content)".into(),
         ));
     }
-    let (r1_off, r1_len, r2_off, r2_len) = (nums[0], nums[1], nums[2], nums[3]);
-    if r1_off + r1_len > pdf.len() || r2_off + r2_len > pdf.len() {
-        return Err(Error::Pdf(
-            "/Type/DocTimeStamp: /ByteRange exceeds PDF length".into(),
-        ));
-    }
+    let (_, r1_len, r2_off, r2_len) = (nums[0], nums[1], nums[2], nums[3]);
     let mut byterange = Vec::with_capacity(r1_len + r2_len);
-    byterange.extend_from_slice(&pdf[r1_off..r1_off + r1_len]);
+    byterange.extend_from_slice(&pdf[0..r1_len]);
     byterange.extend_from_slice(&pdf[r2_off..r2_off + r2_len]);
 
-    // /Contents<hex>
-    let c_tag = b"/Contents<";
-    let c_open_rel = find_in(tail, c_tag).ok_or_else(|| {
-        Error::Pdf("/Type/DocTimeStamp: /Contents not found".into())
-    })?;
-    let c_open = dts_pos + c_open_rel + c_tag.len() - 1;
-    let c_close = pdf[c_open + 1..]
-        .iter()
-        .position(|&b| b == b'>')
-        .ok_or_else(|| Error::Pdf("/Type/DocTimeStamp: /Contents '>' not found".into()))?
-        + c_open
-        + 1;
     let hex_str = std::str::from_utf8(&pdf[c_open + 1..c_close])
         .map_err(|_| Error::Pdf("/Type/DocTimeStamp: /Contents body not UTF-8".into()))?;
     let trimmed = trim_trailing_zero_pairs(hex_str);

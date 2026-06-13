@@ -466,6 +466,48 @@ fn verify_round_trip_pades() {
     assert!(report.ok, "PAdES round-trip should verify: {report:?}");
 }
 
+/// Appending content after a validly-signed PDF (the classic PAdES added-content
+/// forgery) must be rejected — the signature's /ByteRange no longer reaches EOF.
+#[test]
+#[ignore]
+fn verify_pades_rejects_appended_content() {
+    let ca = ca_dir();
+    let cert = SignerCert::from_file(&ca.join("test-leaf.crt")).unwrap();
+    let chain = SignerCert::load_chain_from_pem(&ca.join("test-chain.pem")).unwrap();
+    let chain_refs: Vec<&SignerCert> = chain.iter().collect();
+    let signer = SoftwareSigner::from_file(&ca.join("test-leaf.key")).unwrap();
+
+    let signed = pades::sign_pdf(
+        &make_test_pdf(),
+        &cert,
+        &chain_refs,
+        HashAlgo::Sha256,
+        None,
+        None,
+        None,
+        SystemTime::now(),
+        &signer,
+        None,
+        None,
+        false,
+        None,
+    )
+    .expect("sign pdf");
+    let root = SignerCert::from_file(&ca.join("test-root.crt")).unwrap();
+
+    // Baseline: the untouched signature verifies.
+    assert!(verify::pades::verify_pdf(&signed, &root, Default::default()).unwrap().ok);
+
+    // Attack: append an unsigned incremental update / arbitrary bytes after EOF.
+    let mut tampered = signed.clone();
+    tampered.extend_from_slice(b"\n%% appended unsigned content\n9999 0 obj\n<< /Evil true >>\nendobj\n");
+    let report = verify::pades::verify_pdf(&tampered, &root, Default::default()).expect("verify_pdf");
+    assert!(
+        !report.ok,
+        "appending content after the signature must fail verification: {report:?}"
+    );
+}
+
 #[test]
 #[ignore]
 fn verify_pades_rejects_tampered_pdf() {
