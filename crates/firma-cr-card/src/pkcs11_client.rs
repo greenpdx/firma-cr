@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Thin façade over the `cryptoki` crate. Loads any PKCS#11 module
-//! by path (typically our own `libfirma_cr_pkcs11.so` but any
-//! conformant module works), opens a session against a token, exposes
-//! cert read, signing-key lookup, and a single `sign()` over a
-//! pre-built `DigestInfo`.
+//! Card access façade with two backends behind one API:
 //!
-//! The signing operation is **`CKM_RSA_PKCS`** — the caller supplies
-//! the full DigestInfo (`SEQUENCE { AlgorithmIdentifier, OCTET STRING
-//! digest }`), the token signs it RSA-PKCS1v1.5. This is the most
-//! flexible mechanism: the same `sign()` works for SHA-256 /-384/-512
-//! and the same code path produces CAdES / PAdES / XAdES signatures.
+//!   * **Macro** — the driver's vendor `fcr_*` FFI (atomic, order-safe). The
+//!     driver performs `ChipAuth → VERIFY → MSE → PSO` in one call, so the open
+//!     side never sequences card protocol (the source of the `SW=6985` class of
+//!     bug). Used automatically when the loaded module exports `fcr_abi_version`.
+//!   * **Pkcs11** — the standard `cryptoki` path (any conformant module). Used as
+//!     a fallback when the macro symbols are absent (OpenSC, old driver builds).
+//!
+//! The signing input is a pre-built PKCS#1 `DigestInfo` (see `build_digest_info`);
+//! `CKM_RSA_PKCS` on the cryptoki path, and on the macro path the driver strips it
+//! to the bare hash itself. The public API is identical for both backends.
 
+use std::os::raw::c_ulong;
 use std::path::Path;
 
 use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
@@ -30,23 +32,182 @@ use crate::error::{Error, Result};
 /// on-card key.
 #[derive(Clone, Debug)]
 pub struct CardKey {
-    pub handle: ObjectHandle,
+    /// PKCS#11 object handle on the cryptoki path; `None` on the macro path
+    /// (the vendor FFI selects the signing key itself).
+    pub handle: Option<ObjectHandle>,
     pub label: Option<String>,
     pub modulus_bits: u32,
 }
 
+// ---------------------------------------------------------------------------
+// Vendor macro FFI (fcr_*) — see firma-cr-pkcs11/src/macro_ffi.rs
+// ---------------------------------------------------------------------------
+
+type CkRv = c_ulong;
+const CKR_OK: CkRv = 0;
+const CKR_BUFFER_TOO_SMALL: CkRv = 0x0000_0150;
+
+type FcrAbiVersion = unsafe extern "C" fn() -> u32;
+type FcrOpen = unsafe extern "C" fn(c_ulong, *mut c_ulong) -> CkRv;
+type FcrClose = unsafe extern "C" fn(c_ulong) -> CkRv;
+type FcrLogin = unsafe extern "C" fn(c_ulong, *const u8, c_ulong) -> CkRv;
+type FcrReadCert = unsafe extern "C" fn(c_ulong, *mut u8, *mut c_ulong) -> CkRv;
+#[allow(clippy::type_complexity)]
+type FcrSign = unsafe extern "C" fn(
+    c_ulong,
+    *const u8,
+    c_ulong,
+    *const u8,
+    c_ulong,
+    c_ulong,
+    *mut u8,
+    *mut c_ulong,
+) -> CkRv;
+
+fn ck(rv: CkRv, what: &str) -> Result<()> {
+    if rv == CKR_OK {
+        Ok(())
+    } else {
+        Err(Error::Pkcs11(format!("{what}: CK_RV 0x{rv:08X}")))
+    }
+}
+
+/// The vendor macro backend: drives the driver's atomic `fcr_*` entry points.
+struct MacroState {
+    lib: libloading::Library,
+    session: c_ulong,
+    /// PIN cached (zeroized) at login so each atomic `fcr_sign` can re-VERIFY.
+    pin: Option<Zeroizing<Vec<u8>>>,
+    modulus_bits: u32,
+}
+
+impl MacroState {
+    /// `Ok(Some)` if the module exports the macro FFI and a session opened;
+    /// `Ok(None)` if the symbols are absent (caller falls back to PKCS#11);
+    /// `Err` if the symbols exist but the card operation failed.
+    fn try_open(module_path: &Path, slot_idx: Option<usize>) -> Result<Option<Self>> {
+        let lib = unsafe { libloading::Library::new(module_path) }
+            .map_err(|e| Error::Pkcs11(format!("dlopen {}: {e}", module_path.display())))?;
+        let abi = match unsafe { lib.get::<FcrAbiVersion>(b"fcr_abi_version\0") } {
+            Ok(f) => unsafe { f() },
+            Err(_) => return Ok(None), // not our macro-capable driver
+        };
+        if abi == 0 {
+            return Ok(None);
+        }
+        log::info!("pkcs11: driver exports vendor macro FFI v{abi}; using it");
+        let open = unsafe { lib.get::<FcrOpen>(b"fcr_open\0") }
+            .map_err(|e| Error::Pkcs11(format!("fcr_open symbol: {e}")))?;
+        let mut session: c_ulong = 0;
+        ck(unsafe { open(slot_idx.unwrap_or(0) as c_ulong, &mut session) }, "fcr_open")?;
+        // BCCR Firma Digital cards are RSA-2048. The PAdES /Contents reservation
+        // over-allocates safely from this and the post-build guard catches any
+        // mismatch, so a fixed value is fine on the macro path.
+        Ok(Some(Self { lib, session, pin: None, modulus_bits: 2048 }))
+    }
+
+    fn sym<T>(&self, name: &[u8]) -> Result<libloading::Symbol<'_, T>> {
+        unsafe { self.lib.get::<T>(name) }.map_err(|e| {
+            Error::Pkcs11(format!("macro symbol {}: {e}", String::from_utf8_lossy(name)))
+        })
+    }
+
+    fn login(&mut self, pin: &str) -> Result<()> {
+        let pin = Zeroizing::new(pin.as_bytes().to_vec());
+        let f = self.sym::<FcrLogin>(b"fcr_login\0")?;
+        ck(unsafe { f(self.session, pin.as_ptr(), pin.len() as c_ulong) }, "fcr_login")?;
+        log::info!("pkcs11: fcr_login OK");
+        self.pin = Some(pin);
+        Ok(())
+    }
+
+    fn read_certificate(&self) -> Result<Vec<u8>> {
+        let f = self.sym::<FcrReadCert>(b"fcr_read_cert\0")?;
+        // Read in one SM round-trip with a generous buffer (BCCR certs ~1.5 KB);
+        // grow only if the driver reports it was too small.
+        let mut len: c_ulong = 8192;
+        let mut buf = vec![0u8; len as usize];
+        let rv = unsafe { f(self.session, buf.as_mut_ptr(), &mut len) };
+        if rv == CKR_BUFFER_TOO_SMALL {
+            buf = vec![0u8; len as usize];
+            ck(unsafe { f(self.session, buf.as_mut_ptr(), &mut len) }, "fcr_read_cert")?;
+        } else {
+            ck(rv, "fcr_read_cert")?;
+        }
+        buf.truncate(len as usize);
+        if buf.is_empty() {
+            return Err(Error::NoCertificate);
+        }
+        log::info!("pkcs11: fcr_read_cert -> {} bytes DER", buf.len());
+        Ok(buf)
+    }
+
+    fn sign(&self, digest_info: &[u8]) -> Result<Vec<u8>> {
+        let pin = self
+            .pin
+            .as_ref()
+            .ok_or_else(|| Error::Pkcs11("macro sign before login".into()))?;
+        let f = self.sym::<FcrSign>(b"fcr_sign\0")?;
+        let mut len: c_ulong = (self.modulus_bits / 8) as c_ulong;
+        let mut sig = vec![0u8; len as usize];
+        // hashAlgo = 0: the driver strips the DigestInfo to the bare hash itself.
+        let call = |buf: &mut [u8], len: &mut c_ulong| unsafe {
+            f(
+                self.session,
+                pin.as_ptr(),
+                pin.len() as c_ulong,
+                digest_info.as_ptr(),
+                digest_info.len() as c_ulong,
+                0,
+                buf.as_mut_ptr(),
+                len,
+            )
+        };
+        let rv = call(&mut sig, &mut len);
+        if rv == CKR_BUFFER_TOO_SMALL {
+            sig = vec![0u8; len as usize];
+            ck(call(&mut sig, &mut len), "fcr_sign")?;
+        } else {
+            ck(rv, "fcr_sign")?;
+        }
+        sig.truncate(len as usize);
+        log::info!("pkcs11: fcr_sign -> {} byte signature", sig.len());
+        Ok(sig)
+    }
+}
+
+impl Drop for MacroState {
+    fn drop(&mut self) {
+        if let Ok(f) = unsafe { self.lib.get::<FcrClose>(b"fcr_close\0") } {
+            let _ = unsafe { f(self.session) };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CardClient: one API over both backends
+// ---------------------------------------------------------------------------
+
+enum Backend {
+    Pkcs11 { ctx: Pkcs11, slot: Slot, session: Session },
+    Macro(MacroState),
+}
+
 pub struct CardClient {
-    ctx: Pkcs11,
-    pub slot: Slot,
-    session: Session,
+    backend: Backend,
 }
 
 impl CardClient {
-    /// Load the PKCS#11 module at `module_path`, initialise it, find
-    /// the requested slot (or the first one with a present token if
-    /// `slot_idx` is `None`), and open a serial session.
+    /// Load the PKCS#11 module at `module_path`. If it exports the vendor macro
+    /// FFI, use that (atomic, order-safe); otherwise use the standard cryptoki
+    /// path. `slot_idx` selects the slot (first present token if `None`).
     pub fn open(module_path: &Path, slot_idx: Option<usize>) -> Result<Self> {
         log::info!("pkcs11: loading module {}", module_path.display());
+        if let Some(m) = MacroState::try_open(module_path, slot_idx)? {
+            return Ok(Self { backend: Backend::Macro(m) });
+        }
+        log::info!("pkcs11: no vendor macro FFI; using standard PKCS#11");
+
         let ctx = Pkcs11::new(module_path)?;
         // The crfirma driver is a process-global singleton (one C_Initialize per
         // process). Re-opening after a previous session was dropped (e.g. the
@@ -84,14 +245,22 @@ impl CardClient {
         // (observed against the card-sim / crfirma -> ResetCard during CA). A
         // single RW session avoids that and is accepted for Login by crfirma.
         let session = ctx.open_rw_session(slot)?;
-        Ok(Self { ctx, slot, session })
+        Ok(Self { backend: Backend::Pkcs11 { ctx, slot, session } })
     }
 
     /// Print library + slot + token info for diagnostics.
     pub fn info(&self) -> Result<String> {
-        let lib = self.ctx.get_library_info()?;
-        let tinfo = self.ctx.get_token_info(self.slot)?;
-        let sinfo = self.ctx.get_slot_info(self.slot)?;
+        let (ctx, slot) = match &self.backend {
+            Backend::Pkcs11 { ctx, slot, .. } => (ctx, slot),
+            Backend::Macro(_) => {
+                return Ok("PKCS#11 vendor macro backend (fcr_*); token details \
+                           are reported via the signing certificate."
+                    .to_string());
+            }
+        };
+        let lib = ctx.get_library_info()?;
+        let tinfo = ctx.get_token_info(*slot)?;
+        let sinfo = ctx.get_slot_info(*slot)?;
         Ok(format!(
             "PKCS#11 library: manufacturer={:?}\n\
              cryptoki version: {}.{}\n\
@@ -121,32 +290,36 @@ impl CardClient {
         ))
     }
 
-    /// Authenticate as the token user on the (already RW) session.
+    /// Authenticate as the token user.
     pub fn login(&mut self, pin: &str) -> Result<()> {
-        // Log in on the single RW session opened in `open` — no session reopen
-        // (that power-cycled the card and reset Secure Messaging; see `open`).
-        //
-        // PIN hygiene: keep our intermediate copy in a `Zeroizing` buffer so it is
-        // wiped from the heap when this scope ends, even if `into()` reallocates.
-        // The `AuthPin` (secrecy::SecretString) zeroizes the copy it owns on drop.
-        let pin = Zeroizing::new(pin.to_string());
-        let auth = AuthPin::new(pin.as_str().into());
-        self.session.login(UserType::User, Some(&auth))?;
-        log::info!("pkcs11: C_Login OK");
-        Ok(())
+        match &mut self.backend {
+            Backend::Macro(m) => m.login(pin),
+            Backend::Pkcs11 { session, .. } => {
+                // PIN hygiene: keep our intermediate copy in a `Zeroizing` buffer so
+                // it is wiped from the heap when this scope ends, even if `into()`
+                // reallocates. `AuthPin` (secrecy::SecretString) zeroizes its own copy.
+                let pin = Zeroizing::new(pin.to_string());
+                let auth = AuthPin::new(pin.as_str().into());
+                session.login(UserType::User, Some(&auth))?;
+                log::info!("pkcs11: C_Login OK");
+                Ok(())
+            }
+        }
     }
 
-    /// Read the first CKO_CERTIFICATE on the token, return raw DER.
+    /// Read the signing certificate, return raw DER.
     pub fn read_certificate(&self) -> Result<Vec<u8>> {
+        let session = match &self.backend {
+            Backend::Macro(m) => return m.read_certificate(),
+            Backend::Pkcs11 { session, .. } => session,
+        };
         let template = [Attribute::Class(ObjectClass::CERTIFICATE)];
-        let objects = self.session.find_objects(&template)?;
+        let objects = session.find_objects(&template)?;
         if objects.is_empty() {
             return Err(Error::NoCertificate);
         }
-        let attrs = self.session.get_attributes(
-            objects[0],
-            &[AttributeType::Value, AttributeType::Label],
-        )?;
+        let attrs =
+            session.get_attributes(objects[0], &[AttributeType::Value, AttributeType::Label])?;
         for attr in attrs {
             if let Attribute::Value(bytes) = attr {
                 if bytes.is_empty() {
@@ -159,74 +332,88 @@ impl CardClient {
         Err(Error::NoCertificate)
     }
 
-    /// Find the first CKK_RSA private key with CKA_SIGN=true and
-    /// return a `CardKey` capturing its handle + modulus size.
+    /// Find the signing key and return a `CardKey` capturing its handle (cryptoki
+    /// path) and modulus size.
     pub fn read_signing_key(&self) -> Result<CardKey> {
+        let session = match &self.backend {
+            Backend::Macro(m) => {
+                // The macro FFI selects the key itself; no handle to carry.
+                return Ok(CardKey {
+                    handle: None,
+                    label: Some("Firma Digital".to_string()),
+                    modulus_bits: m.modulus_bits,
+                });
+            }
+            Backend::Pkcs11 { session, .. } => session,
+        };
         let template = [
             Attribute::Class(ObjectClass::PRIVATE_KEY),
             Attribute::KeyType(KeyType::RSA),
             Attribute::Sign(true),
         ];
-        let objects = self.session.find_objects(&template)?;
+        let objects = session.find_objects(&template)?;
         if objects.is_empty() {
             return Err(Error::NoSigningKey);
         }
         let handle = objects[0];
-        let attrs = self.session.get_attributes(
-            handle,
-            &[AttributeType::ModulusBits, AttributeType::Label],
-        )?;
+        let attrs =
+            session.get_attributes(handle, &[AttributeType::ModulusBits, AttributeType::Label])?;
         let mut modulus_bits: u32 = 0;
         let mut label: Option<String> = None;
         for attr in attrs {
             match attr {
                 Attribute::ModulusBits(n) => {
-                    let bits_u64: u64 = (*n).into();
+                    let bits_u64: u64 = n.into();
                     modulus_bits = bits_u64 as u32;
                 }
-                Attribute::Label(bytes) => {
-                    label = Some(String::from_utf8_lossy(&bytes).to_string())
-                }
+                Attribute::Label(bytes) => label = Some(String::from_utf8_lossy(&bytes).to_string()),
                 _ => {}
             }
         }
         if modulus_bits == 0 {
             // BCCR ChipDoc doesn't always expose CKA_MODULUS_BITS;
             // fall back to reading CKA_MODULUS and counting bytes.
-            let m = self.session.get_attributes(handle, &[AttributeType::Modulus])?;
+            let m = session.get_attributes(handle, &[AttributeType::Modulus])?;
             for attr in m {
                 if let Attribute::Modulus(bytes) = attr {
                     modulus_bits = (bytes.len() as u32) * 8;
                 }
             }
         }
-        log::info!(
-            "pkcs11: signing key found (modulus_bits={}, label={:?})",
-            modulus_bits, label,
-        );
-        Ok(CardKey { handle, label, modulus_bits })
+        log::info!("pkcs11: signing key found (modulus_bits={}, label={:?})", modulus_bits, label);
+        Ok(CardKey { handle: Some(handle), label, modulus_bits })
     }
 
-    /// Sign a pre-built DigestInfo with `CKM_RSA_PKCS`. The caller is
-    /// responsible for wrapping the raw digest in the DigestInfo
-    /// (`SEQUENCE { AlgorithmIdentifier, OCTET STRING digest }`) —
-    /// see `build_digest_info()` below for the helper.
+    /// Sign a pre-built `DigestInfo`. On the cryptoki path this is `CKM_RSA_PKCS`
+    /// over `key.handle`; on the macro path the driver strips the DigestInfo to
+    /// the bare hash and signs atomically with the cached PIN.
     pub fn sign(&self, key: &CardKey, digest_info: &[u8]) -> Result<Vec<u8>> {
-        log::info!(
-            "pkcs11: signing DigestInfo ({} bytes) with CKM_RSA_PKCS",
-            digest_info.len()
-        );
-        let sig = self.session.sign(&Mechanism::RsaPkcs, key.handle, digest_info)?;
-        log::info!("pkcs11: signature {} bytes", sig.len());
-        Ok(sig)
+        match &self.backend {
+            Backend::Macro(m) => m.sign(digest_info),
+            Backend::Pkcs11 { session, .. } => {
+                let handle = key
+                    .handle
+                    .ok_or_else(|| Error::Pkcs11("cryptoki sign requires a key handle".into()))?;
+                log::info!(
+                    "pkcs11: signing DigestInfo ({} bytes) with CKM_RSA_PKCS",
+                    digest_info.len()
+                );
+                let sig = session.sign(&Mechanism::RsaPkcs, handle, digest_info)?;
+                log::info!("pkcs11: signature {} bytes", sig.len());
+                Ok(sig)
+            }
+        }
     }
 }
 
 impl Drop for CardClient {
     fn drop(&mut self) {
-        // Best-effort logout; ignore errors so a panic in the user
-        // doesn't get masked by a logout failure.
-        let _ = self.session.logout();
+        // Best-effort logout on the cryptoki path; ignore errors so a panic in the
+        // user doesn't get masked by a logout failure. The macro backend cleans up
+        // its session in `MacroState::drop`.
+        if let Backend::Pkcs11 { session, .. } = &self.backend {
+            let _ = session.logout();
+        }
     }
 }
 
@@ -250,19 +437,16 @@ pub fn build_digest_info(algo: HashAlgo, digest: &[u8]) -> Vec<u8> {
     // the raw digest.
     let prefix: &[u8] = match algo {
         HashAlgo::Sha256 => &[
-            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
-            0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
-            0x00, 0x04, 0x20,
+            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x01, 0x05, 0x00, 0x04, 0x20,
         ],
         HashAlgo::Sha384 => &[
-            0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
-            0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05,
-            0x00, 0x04, 0x30,
+            0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x02, 0x05, 0x00, 0x04, 0x30,
         ],
         HashAlgo::Sha512 => &[
-            0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86,
-            0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05,
-            0x00, 0x04, 0x40,
+            0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x03, 0x05, 0x00, 0x04, 0x40,
         ],
     };
     let mut out = Vec::with_capacity(prefix.len() + digest.len());
@@ -294,12 +478,7 @@ pub fn list_tokens(module_path: &Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for slot in ctx.get_slots_with_token()? {
         let info = ctx.get_token_info(slot)?;
-        out.push(format!(
-            "Slot {}: label={:?} model={:?}",
-            slot.id(),
-            info.label(),
-            info.model()
-        ));
+        out.push(format!("Slot {}: label={:?} model={:?}", slot.id(), info.label(), info.model()));
     }
     Ok(out)
 }
