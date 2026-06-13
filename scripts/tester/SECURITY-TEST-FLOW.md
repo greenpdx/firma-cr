@@ -16,9 +16,8 @@ BCCR card, against the real BCCR TSA/OCSP, and that our signatures verify in
 - Steps `10`–`40` of [`README.md`](README.md) already done: deps installed,
   stack built, **`30-check-stack.sh` passes**, GUI runs.
 - The **real BCCR Firma Digital card** + reader, and **internet**.
-- The **BCCR national CA chain** as a PEM (CA RAÍZ NACIONAL COSTA RICA + the
-  issuing policy CA), saved as `~/bccr-chain.pem`. See
-  [`../../docs/smartcard-commands.md`](../../docs/smartcard-commands.md).
+- The **BCCR national CA trust anchor** as a PEM, saved as `~/bccr-chain.pem`
+  (see "Getting `~/bccr-chain.pem`" below).
 - A sample `~/sample.pdf` and `~/sample.xml` to sign.
 - A second machine or any web browser for the interop check (Part A5) — e.g. the
   BCCR online validator <https://firmadigital.go.cr> ("Validar") or another
@@ -32,6 +31,40 @@ CA="$HOME/bccr-chain.pem"
 
 You will enter the **card PIN** several times. Use `--pin-prompt` (never `--pin`
 on a shared box — it shows up in the process list).
+
+### Getting `~/bccr-chain.pem`
+
+This repo does **not** ship BCCR roots (only the throwaway test CA). The verifier
+anchors to a trust root and pulls the *intermediate* from the signature itself
+(card-produced signatures embed it) or via AIA — so the anchor file only needs
+the **national root**; add the policy CA if a verify fails to anchor.
+
+1. **Download** "CA RAÍZ NACIONAL COSTA RICA" (and optionally "CA POLÍTICA
+   PERSONA FÍSICA") from the *Sistema Nacional de Certificación Digital* / BCCR
+   Firma Digital site — **firmadigital.go.cr**. These are the same roots the
+   official Firma Digital client installs. Save the root as `~/bccr-chain.pem`.
+2. **Verify the fingerprint out-of-band** before trusting it (compare against
+   BCCR's published value — do not skip this):
+   ```sh
+   openssl x509 -in ~/bccr-chain.pem -noout -subject -issuer -fingerprint -sha256
+   ```
+3. If a download is `.crt`/DER, convert to PEM:
+   ```sh
+   openssl x509 -inform DER -in ca-raiz-nacional.crt -out ~/bccr-chain.pem
+   ```
+   To anchor with root **and** policy CA in one file, concatenate them (PEM order
+   doesn't matter — the verifier reorders by issuer/subject):
+   ```sh
+   cat ca-raiz-nacional.pem ca-politica-persona-fisica.pem > ~/bccr-chain.pem
+   ```
+4. **Confirm the chain a signature actually carries** (that the intermediate is
+   embedded), so a verify failure points at the anchor, not a missing link:
+   ```sh
+   pdfsig -dump ~/a2-signed.pdf                                  # PAdES
+   openssl pkcs7 -in ~/a1.p7s -inform DER -print_certs -noout    # CMS / .p7s
+   ```
+
+See also [`../../docs/smartcard-commands.md`](../../docs/smartcard-commands.md) §4.
 
 ---
 
