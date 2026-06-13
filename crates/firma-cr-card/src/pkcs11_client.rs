@@ -181,7 +181,7 @@ impl CardClient {
         for attr in attrs {
             match attr {
                 Attribute::ModulusBits(n) => {
-                    let bits_u64: u64 = n.into();
+                    let bits_u64: u64 = (*n).into();
                     modulus_bits = bits_u64 as u32;
                 }
                 Attribute::Label(bytes) => {
