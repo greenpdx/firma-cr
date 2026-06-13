@@ -33,9 +33,9 @@ use crate::agent::token::TokenSession;
 // instead cap the cheap-to-abuse paths. A malicious local page cannot make these
 // limits looser, and they don't change the wire protocol.
 
-/// Max failed `/dyn/login` attempts per env before a cooldown kicks in. Keeps a
-/// hostile page from burning the card's own (small) PIN retry counter or using
-/// repeated logins as a denial-of-service against the cardholder.
+/// Max failed `/dyn/login` attempts (process-wide) before a cooldown kicks in.
+/// Slows a hostile page from burning the card's own (small) PIN retry counter or
+/// using repeated logins as a denial-of-service against the cardholder.
 const MAX_LOGIN_FAILS: u32 = 5;
 /// Sliding window / cooldown for the login limiter.
 const LOGIN_WINDOW: Duration = Duration::from_secs(60);
@@ -46,7 +46,11 @@ const MAX_FILES_PER_ENV: usize = 32;
 /// Max length of a caller-supplied file name.
 const MAX_NAME_LEN: usize = 255;
 
-/// Per-env failed-login tracker for the rate limiter.
+/// Failed-login tracker for the rate limiter. There is ONE physical card per
+/// process, so this is tracked globally — NOT per env. (A per-env counter is
+/// useless: `create_env` is unauthenticated and unlimited, so an attacker just
+/// mints a fresh env per guess and never trips a per-env limit, while every
+/// guess still burns the card's own small PIN-retry counter.)
 struct LoginThrottle {
     fails: u32,
     first_fail: Instant,
@@ -62,7 +66,7 @@ pub struct AppState {
     files: FileStore,
     signed: HashMap<String, Vec<SignedFile>>,
     module_path: PathBuf,
-    login_throttle: HashMap<String, LoginThrottle>,
+    login_throttle: Option<LoginThrottle>,
 }
 
 impl AppState {
@@ -73,14 +77,14 @@ impl AppState {
             files: FileStore::new(),
             signed: HashMap::new(),
             module_path,
-            login_throttle: HashMap::new(),
+            login_throttle: None,
         }
     }
 
-    /// If this env is currently locked out for too many failed logins, return the
-    /// number of seconds left in the cooldown; otherwise `None`.
-    fn login_lockout_remaining(&self, env: &str) -> Option<u64> {
-        let t = self.login_throttle.get(env)?;
+    /// If logins are currently locked out (too many failures across the process),
+    /// return the seconds left in the cooldown; otherwise `None`.
+    fn login_lockout_remaining(&self) -> Option<u64> {
+        let t = self.login_throttle.as_ref()?;
         if t.fails >= MAX_LOGIN_FAILS {
             let elapsed = t.first_fail.elapsed();
             if elapsed < LOGIN_WINDOW {
@@ -90,12 +94,11 @@ impl AppState {
         None
     }
 
-    /// Record a failed login for `env`, starting/refreshing the window.
-    fn record_login_failure(&mut self, env: &str) {
+    /// Record a failed login (global), starting/refreshing the window.
+    fn record_login_failure(&mut self) {
         let t = self
             .login_throttle
-            .entry(env.to_string())
-            .or_insert(LoginThrottle { fails: 0, first_fail: Instant::now() });
+            .get_or_insert(LoginThrottle { fails: 0, first_fail: Instant::now() });
         if t.first_fail.elapsed() >= LOGIN_WINDOW {
             t.fails = 0;
             t.first_fail = Instant::now();
@@ -103,9 +106,9 @@ impl AppState {
         t.fails = t.fails.saturating_add(1);
     }
 
-    /// Clear the failed-login counter for `env` (called on a successful login).
-    fn clear_login_failures(&mut self, env: &str) {
-        self.login_throttle.remove(env);
+    /// Clear the failed-login counter (called on a successful login).
+    fn clear_login_failures(&mut self) {
+        self.login_throttle = None;
     }
 
     /// Connect the card if not already connected (idempotent — never opens a
@@ -253,7 +256,7 @@ async fn login(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
     // Rate-limit: refuse if this env is in a failed-login cooldown. Stops a
     // hostile local page from hammering PIN guesses (which would also burn the
     // card's own retry counter and could lock the cardholder out).
-    if let Some(secs) = g.login_lockout_remaining(&env) {
+    if let Some(secs) = g.login_lockout_remaining() {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             format!("too many failed login attempts; retry in {secs}s"),
@@ -269,11 +272,11 @@ async fn login(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
     let r = card.login(pin.as_str());
     match r {
         Ok(()) => {
-            g.clear_login_failures(&env);
+            g.clear_login_failures();
             Json(LoginResponse { success: true, tries_left: None }).into_response()
         }
         Err(_) => {
-            g.record_login_failure(&env);
+            g.record_login_failure();
             // Wrong PIN or a wedged SM channel — drop the session so the next
             // attempt re-establishes Chip-Auth cleanly.
             g.reset_card();
@@ -283,8 +286,12 @@ async fn login(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
 }
 
 async fn get_certs(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
-    let _req = parse(&q, "get_certstore_certificates");
+    let req = parse(&q, "get_certstore_certificates");
+    let Some(env) = req.env.clone() else { return bad("missing env") };
     let g = st.lock().unwrap();
+    if !g.envs.contains(&env) {
+        return bad("unknown env");
+    }
     let Some(card) = g.card.as_ref() else { return bad("not connected/logged in") };
     Json(card.certificates()).into_response()
 }
@@ -311,6 +318,9 @@ async fn add_file(State(st): State<Shared>, RawQuery(q): RawQuery, body: Bytes) 
         return bad("invalid file name");
     }
     let mut g = st.lock().unwrap();
+    if !g.envs.contains(&env) {
+        return bad("unknown env");
+    }
     if g.files.files(&env).len() >= MAX_FILES_PER_ENV {
         return bad(format!("too many files staged for env (max {MAX_FILES_PER_ENV})"));
     }
@@ -327,6 +337,12 @@ async fn build(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
     };
     if breq.op_type != OperationType::Sign {
         return bad("only type=SIGN is implemented");
+    }
+    // Only our single on-card signing key/cert is valid (handle "1").
+    if breq.sign_cert != crate::agent::token::FIRMA_HANDLE
+        || breq.sign_key != crate::agent::token::FIRMA_HANDLE
+    {
+        return bad("unknown sign_cert/sign_key handle");
     }
     // Optional interactive stamp placement (GUI's draggable box):
     // vrect=llx,lly,urx,ury (PDF points) &vfont=<pt> &vpage=<1-based>.
@@ -347,9 +363,20 @@ async fn build(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
         .or_else(|| std::env::var("FIRMA_CR_TSA_URL").ok())
         .filter(|s| !s.is_empty());
     let mut g = st.lock().unwrap();
-    let files = g.files.files(&env).to_vec();
+    if !g.envs.contains(&env) {
+        return bad("unknown env");
+    }
+    // Sign exactly the files the caller named (intersect with what's staged),
+    // not "whatever happens to be staged for this env".
+    let files: Vec<_> = g
+        .files
+        .files(&env)
+        .iter()
+        .filter(|f| breq.files.contains(&f.name))
+        .cloned()
+        .collect();
     if files.is_empty() {
-        return bad("no files staged for env");
+        return bad("none of the requested files are staged for env");
     }
     let signed = {
         let Some(card) = g.card.as_ref() else { return bad("not connected/logged in") };
@@ -372,8 +399,13 @@ async fn download(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
     let Some(env) = req.env.clone() else { return bad("missing env") };
     let want = req.param("file").unwrap_or("").to_string();
     let g = st.lock().unwrap();
+    if !g.envs.contains(&env) {
+        return bad("unknown env");
+    }
     let Some(list) = g.signed.get(&env) else { return bad("no signed files for env") };
-    match list.iter().find(|s| s.name == want).or_else(|| list.first()) {
+    // Require an exact name match — no "first file" fallback (that let a caller
+    // who knew only the env id pull the signed document without the filename).
+    match list.iter().find(|s| s.name == want) {
         Some(sf) => (
             [(header::CONTENT_TYPE, "application/octet-stream")],
             sf.bytes.clone(),
