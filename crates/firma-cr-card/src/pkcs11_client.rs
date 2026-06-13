@@ -19,6 +19,7 @@ use cryptoki::object::{Attribute, AttributeType, KeyType, ObjectClass, ObjectHan
 use cryptoki::session::{Session, UserType};
 use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
+use zeroize::Zeroizing;
 
 use crate::digest::HashAlgo;
 use crate::error::{Error, Result};
@@ -124,8 +125,13 @@ impl CardClient {
     pub fn login(&mut self, pin: &str) -> Result<()> {
         // Log in on the single RW session opened in `open` — no session reopen
         // (that power-cycled the card and reset Secure Messaging; see `open`).
-        let pin = AuthPin::new(pin.to_string().into());
-        self.session.login(UserType::User, Some(&pin))?;
+        //
+        // PIN hygiene: keep our intermediate copy in a `Zeroizing` buffer so it is
+        // wiped from the heap when this scope ends, even if `into()` reallocates.
+        // The `AuthPin` (secrecy::SecretString) zeroizes the copy it owns on drop.
+        let pin = Zeroizing::new(pin.to_string());
+        let auth = AuthPin::new(pin.as_str().into());
+        self.session.login(UserType::User, Some(&auth))?;
         log::info!("pkcs11: C_Login OK");
         Ok(())
     }

@@ -11,6 +11,9 @@ sha2 = "0.11.0"
 hex = "0.4.3"
 log = "0.4.30"
 thiserror = "2.0.18"
+# Wipe our intermediate copy of the card PIN from the heap after login.
+# (cryptoki's AuthPin = secrecy::SecretString already zeroizes the copy it owns.)
+zeroize = "1"
 
 # --- probe feature (optional): PC/SC-direct PKCS#15 discovery / card probe. ---
 # Kept off by default so pure-signing consumers (firma-cr-core) don't pull PC/SC.
