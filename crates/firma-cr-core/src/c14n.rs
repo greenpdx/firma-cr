@@ -8,9 +8,10 @@
 //!   * UTF-8 throughout — input is expected to be valid UTF-8.
 //!   * XML declaration and DOCTYPE stripped.
 //!   * Empty-element tags expanded: `<foo/>` → `<foo></foo>`.
-//!   * Attribute values quoted with `"`; the five specials are
-//!     escaped (`&amp; &lt; &gt; &quot; &#9; &#10; &#13;` per the
-//!     spec).
+//!   * Attribute values quoted with `"`; specials escaped as
+//!     `&amp; &lt; &quot;` and whitespace as uppercase-hex character
+//!     references `&#x9; &#xA; &#xD;` (text content escapes
+//!     `&amp; &lt; &gt; &#xD;`), per the C14N spec.
 //!   * Attributes sorted: namespace decls first by local name
 //!     ordering, then non-namespace attributes by (namespace URI,
 //!     local name).
@@ -24,11 +25,13 @@
 //!     CDATA sections are inlined as text (the canonical form has
 //!     no CDATA).
 //!
-//! This is a hand-rolled implementation; do NOT use it for adversarial
-//! XML inputs (no entity expansion guards, no namespace remapping
-//! across `xml:base`). For BCCR-shaped signed XML (small, well-
-//! formed, no DTDs) it's adequate. A full XML Signature verifier
-//! covering every C14N edge case is a fast-follow.
+//! This is a hand-rolled implementation, but it is hardened against
+//! adversarial XML (see [`reject_unsafe_xml`]: fails closed on
+//! DTD/DOCTYPE and non-predefined entities) and differentially
+//! validated against the libxml2 reference (`xmllint --exc-c14n`) by
+//! the committed corpus in `tests/c14n_vectors/`. Known remaining
+//! gap: it does not emit `xmlns=""` to undeclare an inherited default
+//! namespace, which BCCR-shaped XAdES never requires.
 
 use std::collections::BTreeMap;
 
@@ -100,9 +103,11 @@ pub fn excl_c14n(xml: &[u8]) -> Result<Vec<u8>> {
     reject_unsafe_xml(xml)?;
     let reader = EventReader::new(xml);
     let mut out = Vec::with_capacity(xml.len() + 64);
-    // Stack of "namespace prefixes rendered at each open element" —
-    // used to skip re-emitting an inherited prefix at a child.
-    let mut rendered_stack: Vec<Vec<String>> = Vec::new();
+    // Stack of "namespace (prefix, uri) pairs rendered at each open element" —
+    // used to skip re-emitting an inherited declaration at a child, but only
+    // when both the prefix AND the URI match (a child that redefines the prefix
+    // / default namespace must re-render it).
+    let mut rendered_stack: Vec<Vec<(String, String)>> = Vec::new();
 
     for ev in reader {
         match ev.map_err(|e| Error::Xml(format!("XML parse: {e}")))? {
@@ -161,8 +166,8 @@ fn emit_open_tag(
     name: &OwnedName,
     attributes: &[xml::attribute::OwnedAttribute],
     namespace: &Namespace,
-    rendered_stack: &[Vec<String>],
-) -> Result<Vec<String>> {
+    rendered_stack: &[Vec<(String, String)>],
+) -> Result<Vec<(String, String)>> {
     out.push(b'<');
     emit_qname(out, name);
 
@@ -198,11 +203,15 @@ fn emit_open_tag(
             if uri.is_empty() {
                 continue;
             }
-            // Skip if already rendered by an ancestor.
-            let already = rendered_stack
+            // Exclusive c14n: emit this namespace node unless the *nearest*
+            // output ancestor that rendered the same prefix rendered the same
+            // URI. Comparing the prefix alone (the old behavior) wrongly dropped
+            // a child's redefinition of an inherited prefix / default namespace.
+            let ancestor_uri = rendered_stack
                 .iter()
-                .any(|set| set.iter().any(|p| p == prefix));
-            if already {
+                .rev()
+                .find_map(|set| set.iter().find(|(p, _)| p == prefix).map(|(_, u)| u.as_str()));
+            if ancestor_uri == Some(uri.as_str()) {
                 continue;
             }
             ns_decls.insert(prefix.clone(), uri.clone());
@@ -246,7 +255,7 @@ fn emit_open_tag(
 
     out.push(b'>');
 
-    Ok(ns_decls.into_keys().collect())
+    Ok(ns_decls.into_iter().collect())
 }
 
 fn lookup_prefix_for_uri(namespace: &Namespace, uri: &str) -> String {
@@ -271,12 +280,15 @@ fn emit_qname(out: &mut Vec<u8>, name: &OwnedName) {
 fn emit_attr_value(out: &mut Vec<u8>, v: &str) {
     for c in v.chars() {
         match c {
+            // C14N attribute-value escaping: &amp; &lt; &quot; and the
+            // whitespace chars as *uppercase hex* character references
+            // (&#x9; &#xA; &#xD;), NOT decimal. `>` is not escaped here.
             '&' => out.extend_from_slice(b"&amp;"),
             '<' => out.extend_from_slice(b"&lt;"),
             '"' => out.extend_from_slice(b"&quot;"),
-            '\t' => out.extend_from_slice(b"&#9;"),
-            '\n' => out.extend_from_slice(b"&#10;"),
-            '\r' => out.extend_from_slice(b"&#13;"),
+            '\t' => out.extend_from_slice(b"&#x9;"),
+            '\n' => out.extend_from_slice(b"&#xA;"),
+            '\r' => out.extend_from_slice(b"&#xD;"),
             _ => {
                 let mut buf = [0u8; 4];
                 out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
@@ -288,10 +300,13 @@ fn emit_attr_value(out: &mut Vec<u8>, v: &str) {
 fn emit_text(out: &mut Vec<u8>, v: &str) {
     for c in v.chars() {
         match c {
+            // C14N text-content escaping: &amp; &lt; &gt; and #xD as the
+            // uppercase-hex character reference &#xD;. Tab and newline are
+            // preserved verbatim in text content.
             '&' => out.extend_from_slice(b"&amp;"),
             '<' => out.extend_from_slice(b"&lt;"),
             '>' => out.extend_from_slice(b"&gt;"),
-            '\r' => out.extend_from_slice(b"&#13;"),
+            '\r' => out.extend_from_slice(b"&#xD;"),
             _ => {
                 let mut buf = [0u8; 4];
                 out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());

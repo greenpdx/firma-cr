@@ -51,7 +51,7 @@ Status legend: **Fixed** (this pass) · **Mitigated/Documented** · **Deferred**
 | M3d | driver | Med | `C_Logout` doesn't drop card-side auth / SM channel | **Deferred** — tracked; reset card on logout when no other session is authenticated |
 | L1 | core | Low | content-type signed attr not checked | **Fixed** — required and compared to eContentType (`verify/cms.rs`) |
 | L4 | core | Low | leaf keyUsage not enforced | **Fixed** — leaf keyUsage, when present, must permit digitalSignature/nonRepudiation (`verify/chain.rs`) |
-| L5 | core | Low | hand-rolled Exclusive C14N "not for adversarial XML" | **Hardened** — `c14n.rs` now fails closed on DTD/DOCTYPE, entity declarations, and non-predefined entity references (XXE/billion-laughs), with exc-c14n conformance + idempotency tests. A full vetted-library swap (libxml2 or a matured pure-Rust crate) remains a follow-up |
+| L5 | core | Low | hand-rolled Exclusive C14N "not for adversarial XML" | **Hardened + differentially validated** — `c14n.rs` fails closed on DTD/DOCTYPE, entity declarations, and non-predefined entity references (XXE/billion-laughs); a committed corpus (`tests/c14n_vectors/`) now byte-checks our output against the **libxml2** reference (`xmllint --exc-c14n`). That testing found and **fixed two real conformance bugs**: attribute whitespace was escaped as decimal (`&#9;`) instead of uppercase-hex (`&#x9;`), and a child re-declaring the default namespace had it dropped. The pure-Rust impl now matches libxml2 across the corpus; a full library swap is no longer pressing (tracked) |
 | L2 | core | Low | ESS signing-certificate binding not verified | **Fixed** — `signingCertificateV2` (and legacy v1) `certHash` must match the located signer cert; mismatch is a hard fail, absence a warning (`verify/cms.rs`). Defeats cert substitution within `SignedData.certificates` |
 | L3 | core | Low/Info | signer-cert validity window only checked with an explicit `validation_time` | **Fixed** — validity is now checked against "now" by default; an expired-now cert is demoted to a warning only when a valid embedded timestamp proves the signature predates expiry (ETSI long-term validation) (`verify/cms.rs`) |
 
@@ -99,9 +99,11 @@ rejection; all gated verify round-trips still pass.
 
 **Non-card, remaining (large / lower value):**
 3. **L5 (further):** the hand-rolled C14N is now hardened (fails closed on
-   DTD/entities) and fuzzed; a full swap to a vetted C14N — libxml2-backed
-   (`xml_c14n`) or a matured pure-Rust crate (`bergshamra`), validated by
-   differential testing against the W3C exc-c14n vectors — is the proper finish.
+   DTD/entities), fuzzed, **and differentially validated against libxml2** (two
+   conformance bugs found and fixed). A full swap to a vetted C14N is therefore
+   no longer pressing; if pursued later, the `tests/c14n_vectors/` corpus is the
+   regression net. Known remaining gap: undeclaring an inherited default
+   namespace (`xmlns=""`) is not emitted — not exercised by BCCR-shaped XAdES.
 4. **H2c (further):** a fully namespaced-DOM XAdES reference resolver (the
    single-`<ds:Signature>` + unique-`Id` guards already block wrapping).
 5. **rsa Marvin (RUSTSEC-2023-0071):** migrate when a constant-time release ships.
