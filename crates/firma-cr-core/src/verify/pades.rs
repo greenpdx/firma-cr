@@ -80,6 +80,7 @@ pub fn verify_pdf(
                     &intermediates,
                     trust_root,
                     opts.cert_internal,
+                    opts.validation_time.unwrap_or_else(std::time::SystemTime::now),
                 );
                 if !v.ok {
                     report.ok = false;

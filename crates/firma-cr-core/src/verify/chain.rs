@@ -165,6 +165,26 @@ fn enforce_ca_constraints(issuer: &SignerCert, intermediate_cas_below: usize) ->
     Ok(())
 }
 
+/// Enforce that the signing (leaf) cert's `keyUsage`, when present, permits
+/// signing — `digitalSignature` or `nonRepudiation`/`contentCommitment`. A cert
+/// issued only for e.g. key-encipherment should not produce an accepted document
+/// signature. Absent keyUsage → no constraint (permissive, per RFC 5280).
+pub fn check_leaf_key_usage(leaf: &SignerCert) -> Result<()> {
+    let Some(exts) = leaf.parsed.tbs_certificate.extensions.as_ref() else {
+        return Ok(());
+    };
+    if let Some(ku_ext) = exts.iter().find(|e| e.extn_id == OID_KEY_USAGE) {
+        let ku = KeyUsage::from_der(ku_ext.extn_value.as_bytes())
+            .map_err(|e| Error::CertParse(format!("leaf keyUsage parse: {e}")))?;
+        if !ku.digital_signature() && !ku.non_repudiation() {
+            return Err(Error::CertParse(
+                "signer cert keyUsage permits neither digitalSignature nor nonRepudiation".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn same_subject_and_key(a: &SignerCert, b: &SignerCert) -> bool {
     a.parsed.tbs_certificate.subject == b.parsed.tbs_certificate.subject
         && a.parsed.tbs_certificate.subject_public_key_info

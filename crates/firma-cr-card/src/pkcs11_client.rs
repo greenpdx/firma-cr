@@ -65,6 +65,27 @@ type FcrSign = unsafe extern "C" fn(
     *mut c_ulong,
 ) -> CkRv;
 
+/// Warn (don't fail) if the module to be `dlopen`ed is group/world-writable —
+/// a local attacker who can replace it gets code execution in the signing process
+/// next to the PIN. Install the driver root-owned (e.g. 0644 under /usr/lib).
+#[cfg(unix)]
+fn warn_if_module_writable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mode = meta.permissions().mode();
+        if mode & 0o022 != 0 {
+            log::warn!(
+                "pkcs11: module {} is group/world-writable (mode {:o}); a local attacker \
+                 could replace the signing driver — install it root-owned (0644/0755)",
+                path.display(),
+                mode & 0o777
+            );
+        }
+    }
+}
+#[cfg(not(unix))]
+fn warn_if_module_writable(_path: &Path) {}
+
 fn ck(rv: CkRv, what: &str) -> Result<()> {
     if rv == CKR_OK {
         Ok(())
@@ -212,6 +233,7 @@ impl CardClient {
     /// path. `slot_idx` selects the slot (first present token if `None`).
     pub fn open(module_path: &Path, slot_idx: Option<usize>) -> Result<Self> {
         log::info!("pkcs11: loading module {}", module_path.display());
+        warn_if_module_writable(module_path);
         if let Some(m) = MacroState::try_open(module_path, slot_idx)? {
             return Ok(Self { backend: Backend::Macro(m) });
         }

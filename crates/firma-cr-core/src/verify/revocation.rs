@@ -137,6 +137,7 @@ fn reserialize(tag: u8, value: &[u8]) -> Vec<u8> {
 ///   3. Chain-build the OCSP signer cert against `trust_root`. With
 ///      `cert_internal: true` a chain-anchoring failure is demoted
 ///      to a warning instead of rejecting the response.
+#[allow(clippy::too_many_arguments)]
 pub fn validate_signer(
     rev: &ParsedRevocationValues,
     signer: &SignerCert,
@@ -144,7 +145,13 @@ pub fn validate_signer(
     intermediates: &[&SignerCert],
     trust_root: &SignerCert,
     cert_internal: bool,
+    now: std::time::SystemTime,
 ) -> RevocationVerdict {
+    // Seconds since the Unix epoch, for OCSP/CRL nextUpdate freshness checks.
+    let now_secs = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let mut warnings: Vec<String> = Vec::new();
     let mut ocsp_status_text: Option<String> = None;
     let mut covered_by_ocsp = false;
@@ -227,7 +234,18 @@ pub fn validate_signer(
             covered_by_ocsp = true;
             match &sr.cert_status {
                 CertStatus::Good(_) => {
-                    ocsp_status_text = Some("good".into());
+                    // Reject a stale "good": an attacker could replay a pre-revocation
+                    // response forever. A past nextUpdate means it's no longer current.
+                    if sr
+                        .next_update
+                        .as_ref()
+                        .is_some_and(|nu| nu.0.to_unix_duration().as_secs() < now_secs)
+                    {
+                        warnings.push("OCSP 'good' response is stale (nextUpdate in the past)".into());
+                        covered_by_ocsp = false;
+                    } else {
+                        ocsp_status_text = Some("good".into());
+                    }
                 }
                 CertStatus::Revoked(_) => {
                     ocsp_status_text = Some("revoked".into());
@@ -307,15 +325,29 @@ pub fn validate_signer(
             }
         }
         // 4. Only NOW the CRL is trusted enough to consult.
-        covered_by_crl = true;
-        if let Some(revoked_list) = &crl.tbs_cert_list.revoked_certificates {
-            if revoked_list
-                .iter()
-                .any(|r| r.serial_number == signer.parsed.tbs_certificate.serial_number)
-            {
-                revoked = true;
-                warnings.push("signer cert is on CRL".into());
-            }
+        let crl_revoked = crl
+            .tbs_cert_list
+            .revoked_certificates
+            .as_ref()
+            .is_some_and(|list| {
+                list.iter()
+                    .any(|r| r.serial_number == signer.parsed.tbs_certificate.serial_number)
+            });
+        if crl_revoked {
+            revoked = true;
+            warnings.push("signer cert is on CRL".into());
+        }
+        // A stale CRL (past nextUpdate) doesn't count as fresh coverage — but
+        // honor a revocation it lists regardless (revocation is monotonic).
+        let crl_stale = crl
+            .tbs_cert_list
+            .next_update
+            .as_ref()
+            .is_some_and(|nu| nu.to_unix_duration().as_secs() < now_secs);
+        if crl_stale && !crl_revoked {
+            warnings.push("CRL is stale (nextUpdate in the past)".into());
+        } else {
+            covered_by_crl = true;
         }
     }
 
