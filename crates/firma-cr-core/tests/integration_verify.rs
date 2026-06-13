@@ -1673,6 +1673,9 @@ fn test_leaf_has_ocsp_signing_eku(cert: &SignerCert) -> bool {
 #[test]
 #[ignore]
 fn aia_fetch_issuer_chain_walks_one_hop() {
+    // The mock issuer server runs on loopback, which the SSRF guard blocks by
+    // default; opt out for this in-process test.
+    unsafe { std::env::set_var("FIRMA_CR_ALLOW_PRIVATE_FETCH", "1") };
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::str::FromStr;

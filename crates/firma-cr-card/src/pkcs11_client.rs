@@ -304,11 +304,11 @@ impl CardClient {
         match &mut self.backend {
             Backend::Macro(m) => m.login(pin),
             Backend::Pkcs11 { session, .. } => {
-                // PIN hygiene: keep our intermediate copy in a `Zeroizing` buffer so
-                // it is wiped from the heap when this scope ends, even if `into()`
-                // reallocates. `AuthPin` (secrecy::SecretString) zeroizes its own copy.
-                let pin = Zeroizing::new(pin.to_string());
-                let auth = AuthPin::new(pin.as_str().into());
+                // PIN hygiene: hand `AuthPin` (secrecy::SecretString, which zeroizes
+                // on drop) a single freshly-allocated copy and keep no other. The
+                // previous `Zeroizing::new(pin.to_string())` + `.as_str().into()`
+                // made a *second*, un-zeroized `String`/`Box<str>` via reallocation.
+                let auth = AuthPin::new(Box::<str>::from(pin));
                 session.login(UserType::User, Some(&auth))?;
                 log::info!("pkcs11: C_Login OK");
                 Ok(())
