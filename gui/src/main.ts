@@ -138,7 +138,12 @@ async function dynSign(file: File, pin: string, pl: Placement | null): Promise<{
   const vparam = pl
     ? `&vrect=${pl.rect.map((n) => n.toFixed(1)).join(",")}&vfont=${pl.fontSize}&vpage=${pl.page}`
     : "";
-  const built = await dynGet(`/dyn/cryptoshell_build?env=${id}&type=SIGN&sign_cert=${handle}&sign_key=${handle}&files=${files}${vparam}`);
+  // PAdES-T: pass the configured TSA so the agent embeds a signature timestamp.
+  const tsaParam = cfg.tsaEnabled && cfg.tsa.trim()
+    ? `&tsa=${encodeURIComponent(cfg.tsa.trim())}`
+    : "";
+  if (tsaParam) log("  sello de tiempo →", cfg.tsa.trim());
+  const built = await dynGet(`/dyn/cryptoshell_build?env=${id}&type=SIGN&sign_cert=${handle}&sign_key=${handle}&files=${files}${vparam}${tsaParam}`);
   const out = (built.files && built.files[0]) || name.replace(/\.pdf$/i, "-firmado.pdf");
   log("  build(SIGN) →", out);
   const dl = await fetchT(`${DYN}/dyn/download?env=${id}&file=${encodeURIComponent(out)}`);
@@ -160,12 +165,13 @@ document.querySelectorAll<HTMLButtonElement>(".tab").forEach((t) =>
 type Method = "pkcs11" | "pkcs12";
 const CFG_KEY = "firma-cr.config";
 let cfg = loadConfig();
-function loadConfig(): { method: Method; module: string; p12: string } {
+function loadConfig(): { method: Method; module: string; p12: string; tsaEnabled: boolean; tsa: string } {
+  const defaults = { method: "pkcs11" as Method, module: "", p12: "", tsaEnabled: false, tsa: "" };
   try {
     const raw = localStorage.getItem(CFG_KEY);
-    if (raw) return { method: "pkcs11", module: "", p12: "", ...JSON.parse(raw) };
+    if (raw) return { ...defaults, ...JSON.parse(raw) };
   } catch { /* ignore */ }
-  return { method: "pkcs11", module: "", p12: "" };
+  return defaults;
 }
 const moduleArg = () => (cfg.module.trim() === "" ? null : cfg.module.trim());
 const dialog = $<HTMLDialogElement>("config-dialog");
@@ -179,6 +185,8 @@ $("btn-config").addEventListener("click", () => {
   (document.querySelector(`input[name="method"][value="${cfg.method}"]`) as HTMLInputElement).checked = true;
   $<HTMLInputElement>("cfg-module").value = cfg.module;
   $<HTMLInputElement>("cfg-p12").value = cfg.p12;
+  $<HTMLInputElement>("cfg-tsa-enable").checked = cfg.tsaEnabled;
+  $<HTMLInputElement>("cfg-tsa-url").value = cfg.tsa;
   toggleMethodGroups();
   dialog.showModal();
 });
@@ -197,6 +205,8 @@ $("cfg-save").addEventListener("click", () => {
   cfg.method = selectedMethod();
   cfg.module = $<HTMLInputElement>("cfg-module").value;
   cfg.p12 = $<HTMLInputElement>("cfg-p12").value;
+  cfg.tsaEnabled = $<HTMLInputElement>("cfg-tsa-enable").checked;
+  cfg.tsa = $<HTMLInputElement>("cfg-tsa-url").value.trim();
   localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
   dialog.close();
 });
