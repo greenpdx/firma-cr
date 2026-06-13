@@ -167,10 +167,11 @@ document.querySelectorAll<HTMLButtonElement>(".tab").forEach((t) =>
 // ---- config dialog -------------------------------------------------------
 type Method = "pkcs11" | "pkcs12";
 const CFG_KEY = "firma-cr.config";
-let cfg = loadConfig();
 /// The BCCR-run RFC 3161 TSA; pre-filled so enabling the timestamp toggle works
-/// with no typing. (Documented in firma-cr-analysis/docs/05.)
+/// with no typing. (Documented in firma-cr-analysis/docs/05.) Declared before
+/// `loadConfig()` runs — it's read inside it, so it must be initialized first.
 const BCCR_TSA_URL = "https://tsa.firmadigital.go.cr/tsa";
+let cfg = loadConfig();
 function loadConfig(): { method: Method; module: string; p12: string; tsaEnabled: boolean; tsa: string } {
   const defaults = { method: "pkcs11" as Method, module: "", p12: "", tsaEnabled: false, tsa: BCCR_TSA_URL };
   try {
