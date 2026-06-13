@@ -146,7 +146,9 @@ impl SignerCert {
 mod tests {
     use super::*;
 
-    const LEAF_PEM: &str = include_str!("../tests/test_ca/out/test-leaf.crt");
+    // Committed fixture (any valid X.509 cert works here), so this compiles on a
+    // clean checkout / CI without the gitignored, generated test_ca/out/ tree.
+    const LEAF_PEM: &str = include_str!("../tests/fixtures/sample-cert.pem");
 
     /// A cert read from a card EF arrives with trailing padding (the EF
     /// is fixed-size and the card returns the whole file). `from_der`
