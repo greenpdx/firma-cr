@@ -246,6 +246,14 @@ async fn build(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
             page: req.param("vpage").and_then(|x| x.parse().ok()).unwrap_or(1),
         })
     });
+    // PAdES-T: embed an RFC 3161 timestamp when a TSA is configured — via the
+    // `tsa` query param (a calling site may supply one) or the FIRMA_CR_TSA_URL
+    // environment variable. Absent both, sign PAdES-B-B as before.
+    let tsa_url: Option<String> = req
+        .param("tsa")
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("FIRMA_CR_TSA_URL").ok())
+        .filter(|s| !s.is_empty());
     let mut g = st.lock().unwrap();
     let files = g.files.files(&env).to_vec();
     if files.is_empty() {
@@ -253,7 +261,7 @@ async fn build(State(st): State<Shared>, RawQuery(q): RawQuery) -> Response {
     }
     let signed = {
         let Some(card) = g.card.as_ref() else { return bad("not connected/logged in") };
-        build_sign(card, &files, Some("Firma Digital"), placement)
+        build_sign(card, &files, Some("Firma Digital"), placement, tsa_url.as_deref())
     };
     let signed = match signed {
         Ok(s) => s,
