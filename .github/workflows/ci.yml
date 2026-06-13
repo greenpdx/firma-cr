@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main, audit-fixes]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: fmt · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace --all-features
+
+  deny:
+    name: cargo-deny (advisories · licenses · bans · sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  fuzz-build:
+    name: build fuzz targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # Compile-only: keep the parser fuzz targets from bitrotting. Actual fuzz
+      # campaigns run out-of-band (see fuzz/README.md), not on every push.
+      - name: cargo fuzz build
+        run: cargo fuzz build
