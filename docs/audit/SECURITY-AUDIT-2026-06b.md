@@ -69,7 +69,19 @@ Fixes landed on the `audit-fixes` branch of each repo:
 - `firma-cr`: C1/H1c, H1a, H2c, M1c, M5c, M5a, M2c, M1k, M2k, M2a, M3a, L1, L4, L5.
 - `firma-cr-engine`: H3d, M1d, M2d.
 Each fix has a focused commit; new/updated tests: PAdES appended-content
-rejection, SSRF classifier/blocklist; all 33 gated verify round-trips still pass.
+rejection, SSRF classifier/blocklist, redirect-hop guard, `/dyn` rebinding
+rejection; all gated verify round-trips still pass.
+
+**Hardening infrastructure (process):**
+- **Supply-chain gate** — `deny.toml` + CI run `cargo-deny` (RUSTSEC advisories,
+  GPL-compatible license allowlist, yanked-crate + source checks) on every push.
+- **Continuous integration** — `.github/workflows/ci.yml`: `fmt` + `clippy
+  -D warnings` + `cargo test --all-features`, the `cargo-deny` gate, and a
+  `cargo fuzz build` so the fuzz harnesses cannot bitrot.
+- **Fuzz harnesses** — `fuzz/` (cargo-fuzz/libFuzzer) targets the untrusted
+  parsers: `c14n` (Exclusive C14N + idempotency), `cms` (detached CMS verifier),
+  `pades` (PDF `/ByteRange` parser). Campaigns run out-of-band; see
+  [`fuzz/README.md`](../../fuzz/README.md).
 
 ## Residual risk & recommended follow-ups
 **Needs hardware (driver):**
