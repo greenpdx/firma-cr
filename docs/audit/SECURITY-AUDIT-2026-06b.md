@@ -49,7 +49,8 @@ Status legend: **Fixed** (this pass) · **Mitigated/Documented** · **Deferred**
 | M3d | driver | Med | `C_Logout` doesn't drop card-side auth / SM channel | **Deferred** — tracked; reset card on logout when no other session is authenticated |
 | L1 | core | Low | content-type signed attr not checked | **Fixed** — required and compared to eContentType (`verify/cms.rs`) |
 | L4 | core | Low | leaf keyUsage not enforced | **Fixed** — leaf keyUsage, when present, must permit digitalSignature/nonRepudiation (`verify/chain.rs`) |
-| L2/L3/L5 | core | Low/Info | ESS cert-binding not verified; chain validity-window only checked with `validation_time`; hand-rolled c14n | **Deferred** — L3 is a behavioral/product choice (long-term validation); L5 needs a vetted c14n lib; low risk |
+| L5 | core | Low | hand-rolled Exclusive C14N "not for adversarial XML" | **Hardened** — `c14n.rs` now fails closed on DTD/DOCTYPE, entity declarations, and non-predefined entity references (XXE/billion-laughs), with exc-c14n conformance + idempotency tests. A full vetted-library swap (libxml2 or a matured pure-Rust crate) remains a follow-up |
+| L2/L3 | core | Low/Info | ESS cert-binding not verified; chain validity-window only checked with `validation_time` | **Deferred** — L3 is a behavioral/product choice (long-term validation); low risk |
 
 ## What was verified sound (coverage)
 CMS signedAttrs + messageDigest binding; TSA token verification; embedded OCSP/CRL
@@ -80,8 +81,11 @@ rejection, SSRF classifier/blocklist; all 33 gated verify round-trips still pass
 3. **M3c:** verify the TSA response nonce (well-mitigated by the imprint check;
    needs a proper TSTInfo decoder).
 4. **L3:** apply the cert validity-window by default (a long-term-validation
-   product decision). **L5:** replace the hand-rolled Exclusive C14N with a vetted
-   implementation. **L2:** verify the ESS signing-certificate binding.
+   product decision). **L5 (further):** the hand-rolled C14N is now hardened
+   (fails closed on DTD/entities); a full swap to a vetted C14N — libxml2-backed
+   (`xml_c14n`) or a matured pure-Rust crate (`bergshamra`), validated by
+   differential testing against the W3C exc-c14n vectors — is the proper finish.
+   **L2:** verify the ESS signing-certificate binding.
 
 ## Certification
 The finalized report is signed with the audit certificate:
