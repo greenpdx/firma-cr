@@ -14,7 +14,7 @@ use std::path::Path;
 // `der` dependency for our own encoders, but that's a different
 // generation and would refuse to decode here.)
 use x509_cert::Certificate;
-use x509_cert::der::{Decode as _, DecodePem as _, Encode as _};
+use x509_cert::der::{Decode as _, DecodePem as _, Encode as _, Reader as _, SliceReader};
 
 use crate::digest::HashAlgo;
 use crate::error::{Error, Result};
@@ -28,10 +28,26 @@ pub struct SignerCert {
 impl SignerCert {
     /// Parse a certificate from raw DER bytes (typical: what came
     /// back from `CardClient::read_certificate()`).
-    pub fn from_der(der: Vec<u8>) -> Result<Self> {
-        let parsed = Certificate::from_der(&der).map_err(|e| {
+    ///
+    /// Smart-card certificate EFs are fixed-size: the card returns the
+    /// whole file, so the cert is followed by padding (the BCCR cards
+    /// return ~3 KB files holding a ~1.5 KB cert). `Certificate::from_der`
+    /// is strict and rejects that trailing data, so we decode the leading
+    /// DER message via a reader and truncate `der` to exactly the bytes
+    /// the cert occupies. Truncating is not just cosmetic: `cert_digest`
+    /// hashes `self.der` for `signingCertificateV2` / XAdES, so any
+    /// padding left here would corrupt that digest.
+    pub fn from_der(mut der: Vec<u8>) -> Result<Self> {
+        let mut reader = SliceReader::new(&der).map_err(|e| {
             Error::CertParse(format!("X.509 DER decode failed: {e}"))
         })?;
+        let parsed = Certificate::decode(&mut reader).map_err(|e| {
+            Error::CertParse(format!("X.509 DER decode failed: {e}"))
+        })?;
+        let consumed = usize::try_from(u32::from(reader.position())).map_err(|e| {
+            Error::CertParse(format!("X.509 DER length overflow: {e}"))
+        })?;
+        der.truncate(consumed);
         Ok(Self { der, parsed })
     }
 
@@ -128,8 +144,35 @@ impl SignerCert {
 
 #[cfg(test)]
 mod tests {
-    // No bundled test PEM yet — when we have one that round-trips
-    // through x509-cert without ambiguity we'll add it here. Until
-    // then the parser is exercised end-to-end via the CLI against
-    // a live card.
+    use super::*;
+
+    const LEAF_PEM: &str = include_str!("../tests/test_ca/out/test-leaf.crt");
+
+    /// A cert read from a card EF arrives with trailing padding (the EF
+    /// is fixed-size and the card returns the whole file). `from_der`
+    /// must parse it and truncate `self.der` to exactly the cert bytes,
+    /// so `cert_digest` hashes the cert and not the padding.
+    #[test]
+    fn from_der_strips_trailing_padding() {
+        let exact = SignerCert::from_pem_str(LEAF_PEM).unwrap().der;
+
+        for pad in [&[0u8; 1407][..], &[0xFFu8; 64][..], &[0x00u8; 1][..]] {
+            let mut padded = exact.clone();
+            padded.extend_from_slice(pad);
+            let cert = SignerCert::from_der(padded).unwrap();
+            assert_eq!(
+                cert.der, exact,
+                "from_der must truncate {} padding bytes back to the cert",
+                pad.len()
+            );
+        }
+    }
+
+    /// A cert with no padding round-trips unchanged.
+    #[test]
+    fn from_der_accepts_exact_der() {
+        let exact = SignerCert::from_pem_str(LEAF_PEM).unwrap().der;
+        let cert = SignerCert::from_der(exact.clone()).unwrap();
+        assert_eq!(cert.der, exact);
+    }
 }
