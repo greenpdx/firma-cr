@@ -1186,6 +1186,7 @@ dependencies = [
  "serde",
  "sha2 0.11.0",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]
@@ -1202,6 +1203,7 @@ dependencies = [
  "der",
  "env_logger",
  "firma-cr-card",
+ "getrandom 0.2.17",
  "hex",
  "log",
  "lopdf",
