@@ -5,9 +5,12 @@ import { placeSignature, type Placement } from "./place";
 // Tauri desktop shell vs. plain web app. In the browser, card ops go to the
 // local /dyn agent (SCManager-style HTTP backend) and files use upload/download.
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
-// /dyn agent base; override with VITE_DYN (e.g. http://127.0.0.1:51231) for a
-// test agent beside the real SCManager on 41231.
-const DYN = (import.meta as any).env?.VITE_DYN ?? "http://127.0.0.1:41231";
+// /dyn agent base. In Tauri the page talks to the embedded agent directly at
+// 127.0.0.1:41231. In a plain browser we use a *relative* base ("") so requests
+// go same-origin and Vite's dev proxy forwards /dyn to the agent — that way
+// remote debugging needs only the one dev port forwarded (no CORS, no second
+// port). Override either case with VITE_DYN (e.g. http://127.0.0.1:51231).
+const DYN = (import.meta as any).env?.VITE_DYN ?? (IS_TAURI ? "http://127.0.0.1:41231" : "");
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
