@@ -9,8 +9,9 @@
 //! Strategy (single-pass, fixed-width /ByteRange placeholder):
 //!
 //!   1. Load the PDF with lopdf, add a signature dictionary as a
-//!      new object with `/Contents <00...00>` (8 KB of zero bytes
-//!      = 16384 hex zeros) and `/ByteRange [0 0 0 0]` placeholder.
+//!      new object with `/Contents <00...00>` (zero bytes sized to
+//!      the measured CMS — see `measure_cms_len`) and a
+//!      `/ByteRange [0 0 0 0]` placeholder.
 //!   2. Add an invisible Sig widget annotation referencing the
 //!      signature dict, wire it into a new AcroForm in /Catalog.
 //!   3. Serialize the document into a `Vec<u8>`.
@@ -21,7 +22,7 @@
 //!   6. Extract the two byterange slices from the patched buffer,
 //!      concatenate, feed to `CadesBuilder` (which hashes them and
 //!      produces the CMS).
-//!   7. Hex-uppercase the CMS, pad with `0` to fill the 16384-char
+//!   7. Hex-uppercase the CMS, pad with `0` to fill the reserved
 //!      `/Contents` slot, patch into the buffer.
 //!   8. Return the signed PDF bytes.
 //!
@@ -41,8 +42,18 @@ use crate::digest::HashAlgo;
 use crate::error::{Error, Result};
 use crate::signer::Signer;
 
-const CMS_BINARY_BYTES: usize = 8192;
-const CMS_HEX_CHARS: usize = CMS_BINARY_BYTES * 2; // 16384
+/// Safety headroom added to the measured CMS size when reserving `/Contents`.
+const CMS_SAFETY_MARGIN: usize = 512;
+/// Extra `/Contents` headroom reserved when a signature timestamp (`-T`/`-LTA`)
+/// will be embedded in the CMS as an unsigned attribute. Its exact size isn't
+/// known until the TSA responds; RFC 3161 tokens are a few KB, so this is
+/// generous. The post-build guard still catches the rare overflow explicitly.
+const CMS_TIMESTAMP_MARGIN: usize = 16 * 1024;
+/// Fixed `/Contents` reservation for an LTA DocTimeStamp signature. Its content
+/// is a single RFC 3161 token whose size isn't known until the TSA responds (the
+/// token is produced by a closure), so we reserve a generous fixed slot rather
+/// than measure. `add_doc_timestamp` errors explicitly if a token ever exceeds it.
+const DOCTS_CONTENTS_BYTES: usize = 16 * 1024;
 /// 10-digit number used as the placeholder for each /ByteRange
 /// integer at PDF-serialization time. Big enough that lopdf emits
 /// it as exactly 10 ASCII chars, so the final zero-padded real value
@@ -64,6 +75,36 @@ pub struct VisibleAppearance {
     pub font_size: Option<f32>,
     /// Text rendered inside the box; '\n' splits lines.
     pub label: String,
+}
+
+/// Measure the exact DER length of the PAdES CMS for these inputs, without
+/// touching the card, by building it with a dummy signature of the real RSA
+/// length. CAdES is detached (the signed content isn't embedded, so its size is
+/// irrelevant) and the RSA signature value is fixed-length, so this equals the
+/// real CMS length — except for an optional signature timestamp, which the caller
+/// accounts for via `CMS_TIMESTAMP_MARGIN`.
+fn measure_cms_len(
+    cert: &SignerCert,
+    additional_certs: &[&SignerCert],
+    hash_algo: HashAlgo,
+    signing_time: SystemTime,
+    modulus_bits: u32,
+) -> Result<usize> {
+    struct DummySigner(usize);
+    impl Signer for DummySigner {
+        fn sign_digest_info(&self, _digest_info: &[u8]) -> Result<Vec<u8>> {
+            Ok(vec![0u8; self.0])
+        }
+        fn modulus_bits(&self) -> u32 {
+            (self.0 * 8) as u32
+        }
+    }
+    let dummy = DummySigner((modulus_bits / 8) as usize);
+    let mut builder = CadesBuilder::new(b"measure", hash_algo, cert).signing_time(signing_time);
+    if !additional_certs.is_empty() {
+        builder = builder.include_chain(additional_certs.to_vec());
+    }
+    Ok(builder.build(&dummy)?.len())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -89,8 +130,23 @@ pub fn sign_pdf(
         return Err(Error::PdfAlreadySigned);
     }
 
+    // ---------- size the /Contents reservation dynamically ----------
+    // The signed CMS embeds the signer cert + chain, so its size depends on the
+    // certs and the RSA key length, not a fixed guess. Measure it with a dummy
+    // signature of the real length (no card op), then add headroom for an
+    // optional signature timestamp and a small safety margin.
+    let cms_binary_bytes = measure_cms_len(
+        cert,
+        additional_certs,
+        hash_algo,
+        signing_time,
+        signer.modulus_bits(),
+    )? + CMS_SAFETY_MARGIN
+        + if timestamp_fn.is_some() { CMS_TIMESTAMP_MARGIN } else { 0 };
+    let cms_hex_chars = cms_binary_bytes * 2;
+
     // ---------- signature dictionary ----------
-    let placeholder = vec![0u8; CMS_BINARY_BYTES];
+    let placeholder = vec![0u8; cms_binary_bytes];
     let mut sig_dict = Dictionary::new();
     sig_dict.set("Type", Object::Name(b"Sig".to_vec()));
     sig_dict.set("Filter", Object::Name(b"Adobe.PPKLite".to_vec()));
@@ -232,12 +288,12 @@ pub fn sign_pdf(
     // lopdf serializes dictionary entries without a separating
     // space (e.g. `/Contents<00…00>`), so the search markers must
     // not include one. Same for `/ByteRange[0 0 0 0]`.
-    let contents_marker = format!("/Contents<{}>", "0".repeat(CMS_HEX_CHARS));
+    let contents_marker = format!("/Contents<{}>", "0".repeat(cms_hex_chars));
     let contents_pos = find_in_buf(&buf, contents_marker.as_bytes()).ok_or_else(|| {
         Error::Pdf("could not locate /Contents<00…00> placeholder after serialization".into())
     })?;
     let contents_value_start = contents_pos + b"/Contents<".len();
-    let contents_value_end = contents_value_start + CMS_HEX_CHARS; // exclusive (position of `>`)
+    let contents_value_end = contents_value_start + cms_hex_chars; // exclusive (position of `>`)
 
     // 10-digit `BYTERANGE_PLACEHOLDER` per integer makes the array
     // body exactly 45 bytes: `[NNNNNNNNNN NNNNNNNNNN NNNNNNNNNN
@@ -260,7 +316,7 @@ pub fn sign_pdf(
     // `>` (inclusive).
     let r1_off = 0usize;
     let r1_len = contents_pos + b"/Contents<".len();
-    let r2_off = contents_pos + b"/Contents<".len() + CMS_HEX_CHARS;
+    let r2_off = contents_pos + b"/Contents<".len() + cms_hex_chars;
     let r2_len = buf.len() - r2_off;
     let _ = contents_value_start;
     let _ = contents_value_end;
@@ -290,22 +346,24 @@ pub fn sign_pdf(
         builder = builder.with_timestamp(move |sig| ts_fn(sig));
     }
     let cms_der = builder.build(signer)?;
-    if cms_der.len() > CMS_BINARY_BYTES {
+    // Safety net: the reservation was measured from the same certs/key, so this
+    // can only trip if a signature timestamp token exceeded CMS_TIMESTAMP_MARGIN.
+    if cms_der.len() > cms_binary_bytes {
         return Err(Error::Pdf(format!(
-            "CMS signature ({} bytes) exceeds /Contents allocation ({} bytes); \
-             increase CMS_BINARY_BYTES in pades.rs",
+            "CMS signature ({} bytes) exceeds the measured /Contents reservation \
+             ({} bytes); raise CMS_TIMESTAMP_MARGIN in pades.rs",
             cms_der.len(),
-            CMS_BINARY_BYTES,
+            cms_binary_bytes,
         )));
     }
 
     // ---------- patch /Contents hex ----------
     let mut hex_cms = hex::encode_upper(&cms_der);
-    if hex_cms.len() < CMS_HEX_CHARS {
-        hex_cms.extend(std::iter::repeat('0').take(CMS_HEX_CHARS - hex_cms.len()));
+    if hex_cms.len() < cms_hex_chars {
+        hex_cms.extend(std::iter::repeat('0').take(cms_hex_chars - hex_cms.len()));
     }
     let contents_hex_start_in_patched = contents_pos + b"/Contents<".len();
-    patched[contents_hex_start_in_patched..contents_hex_start_in_patched + CMS_HEX_CHARS]
+    patched[contents_hex_start_in_patched..contents_hex_start_in_patched + cms_hex_chars]
         .copy_from_slice(hex_cms.as_bytes());
 
     Ok(patched)
@@ -593,6 +651,7 @@ where
 {
     let _ = hash_algo; // the TSA picks its own digest; the verifier
                        // reads it from TSTInfo.messageImprint.
+    let cms_hex_chars = DOCTS_CONTENTS_BYTES * 2;
 
     // ---- 1. Inspect the original PDF structurally ----
     let doc = Document::load_mem(signed_pdf)
@@ -685,7 +744,7 @@ where
     let br_pos = sig_off + br_rel;
     let array_only_start = br_pos + b"/ByteRange".len();
 
-    let contents_marker = format!("/Contents<{}>", "0".repeat(CMS_HEX_CHARS));
+    let contents_marker = format!("/Contents<{}>", "0".repeat(cms_hex_chars));
     let contents_rel = find_in_buf(&out[sig_off..], contents_marker.as_bytes()).ok_or_else(
         || Error::Pdf("DocTimeStamp /Contents placeholder not found".into()),
     )?;
@@ -695,7 +754,7 @@ where
     // ByteRange covers everything except the /Contents hex bytes.
     let r1_off = 0usize;
     let r1_len = contents_value_start;
-    let r2_off = contents_value_start + CMS_HEX_CHARS;
+    let r2_off = contents_value_start + cms_hex_chars;
     let r2_len = out.len() - r2_off;
 
     let new_br = format!(
@@ -713,10 +772,18 @@ where
 
     // ---- 7. Patch /Contents hex ----
     let mut hex_token = hex::encode_upper(&token_der);
-    if hex_token.len() < CMS_HEX_CHARS {
-        hex_token.extend(std::iter::repeat('0').take(CMS_HEX_CHARS - hex_token.len()));
+    if hex_token.len() > cms_hex_chars {
+        return Err(Error::Pdf(format!(
+            "DocTimeStamp token ({} bytes) exceeds /Contents reservation ({} bytes); \
+             raise DOCTS_CONTENTS_BYTES in pades.rs",
+            token_der.len(),
+            DOCTS_CONTENTS_BYTES,
+        )));
     }
-    out[contents_value_start..contents_value_start + CMS_HEX_CHARS]
+    if hex_token.len() < cms_hex_chars {
+        hex_token.extend(std::iter::repeat('0').take(cms_hex_chars - hex_token.len()));
+    }
+    out[contents_value_start..contents_value_start + cms_hex_chars]
         .copy_from_slice(hex_token.as_bytes());
     Ok(out)
 }
@@ -747,7 +814,7 @@ fn build_doctimestamp_dict_bytes() -> Vec<u8> {
         .as_bytes(),
     );
     buf.extend_from_slice(b"/Contents<");
-    buf.extend_from_slice(&vec![b'0'; CMS_HEX_CHARS]);
+    buf.extend_from_slice(&vec![b'0'; DOCTS_CONTENTS_BYTES * 2]);
     buf.extend_from_slice(b">>>");
     buf
 }
@@ -933,6 +1000,31 @@ mod tests {
     fn find_in_buf_works() {
         assert_eq!(find_in_buf(b"hello world", b"world"), Some(6));
         assert_eq!(find_in_buf(b"abc", b"xyz"), None);
+    }
+
+    /// The /Contents reservation is measured from the CMS, so it grows with the
+    /// embedded chain and the RSA key length (and is independent of PDF size —
+    /// CAdES is detached). Skips when the test CA isn't generated.
+    #[test]
+    fn contents_reservation_scales_with_inputs() {
+        use std::path::PathBuf;
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_ca/out");
+        if !dir.join("test-leaf.crt").exists() {
+            eprintln!("test CA absent — run tests/test_ca/gen-test-ca.sh; skipping");
+            return;
+        }
+        let leaf = SignerCert::from_file(&dir.join("test-leaf.crt")).unwrap();
+        let ica = SignerCert::from_file(&dir.join("test-intermediate.crt")).unwrap();
+        let root = SignerCert::from_file(&dir.join("test-root.crt")).unwrap();
+        let t = SystemTime::UNIX_EPOCH;
+
+        let bare = measure_cms_len(&leaf, &[], HashAlgo::Sha256, t, 2048).unwrap();
+        let chained = measure_cms_len(&leaf, &[&ica, &root], HashAlgo::Sha256, t, 2048).unwrap();
+        let bigkey = measure_cms_len(&leaf, &[], HashAlgo::Sha256, t, 4096).unwrap();
+
+        assert!(bare > 0);
+        assert!(chained > bare, "embedding the chain must enlarge the reservation");
+        assert!(bigkey > bare, "a 4096-bit key must enlarge the reservation");
     }
 
     #[test]
