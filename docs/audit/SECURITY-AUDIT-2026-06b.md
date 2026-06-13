@@ -36,6 +36,8 @@ Status legend: **Fixed** (this pass) · **Mitigated/Documented** · **Deferred**
 | H2d | driver | High | Card's static CA public key read from an **unsigned** EF (D004), no CMS signature check → a rogue card can supply its own key and derive the SM key (decrypt PIN) | **Needs-card** — requires verifying EF.CardSecurity's CMS signature against a pinned CSCA. Documented; inherent to CA-v1 without PACE/TA (attacker must get the user to insert a malicious card and enter their PIN) |
 | H3d | driver | High | RFC-5114 MODP DH (chipdoc path): no validation of the card's public value (small-subgroup/range) | **Fixed** — reject `{0,1,p-1}`/out-of-range card pub and Z (`crypto/dh.rs`) |
 | M1c | core | Med | SSRF: fetchers checked only the URL scheme, not the target IP | **Fixed** — block loopback/private/link-local/CGNAT/metadata/ULA (v4+v6), opt-out `FIRMA_CR_ALLOW_PRIVATE_FETCH` (`net.rs`) |
+| M5c | core | Med | SSRF guard only checked the *initial* URL; reqwest follows redirects by default, so a hostile OCSP/CRL/AIA responder (URLs come from the cert under test) could `30x → 169.254.169.254`/internal IP and bypass M1c | **Fixed** — `net::guarded_client` re-applies the scheme + internal-host check on **every** redirect hop (cap 5); all four fetchers use it (`net.rs`, `revocation/*`, `tsa.rs`) |
+| M5a | agent | Med | `/dyn` server (127.0.0.1, CORS-open) had no `Host`-header check → reachable from a public page via DNS rebinding | **Fixed** — anti-rebinding middleware rejects any non-loopback `Host`; CORS stays open so BCCR sites still work (the browser always sends `Host: 127.0.0.1:<port>`) (`agent/http.rs`) |
 | M2c | core | Med | No OCSP/CRL freshness check (`nextUpdate` ignored) → stale-"good" replay | **Fixed** — reject stale "good" OCSP / stale CRL coverage (past nextUpdate), honoring listed revocations; `validation_time` threaded into `validate_signer` (`verify/revocation.rs`) |
 | M3c | core | Med | TSA client doesn't verify the response nonce | **Deferred** — well-mitigated (the imprint check in `verify_token` already rejects a token over different data); fragile to extract via the hand-rolled TLV walker — do it with a proper TSTInfo decoder |
 | M1k | card | Med | cryptoki-path PIN copy not actually zeroized (`.into()` reallocated) | **Fixed** — single `Box<str>` handed to `AuthPin` (`pkcs11_client.rs`) |
@@ -64,7 +66,7 @@ the localhost + interactive-PIN IPC boundary.
 
 ## Remediation
 Fixes landed on the `audit-fixes` branch of each repo:
-- `firma-cr`: C1/H1c, H1a, H2c, M1c, M2c, M1k, M2k, M2a, M3a, L1, L4.
+- `firma-cr`: C1/H1c, H1a, H2c, M1c, M5c, M5a, M2c, M1k, M2k, M2a, M3a, L1, L4, L5.
 - `firma-cr-engine`: H3d, M1d, M2d.
 Each fix has a focused commit; new/updated tests: PAdES appended-content
 rejection, SSRF classifier/blocklist; all 33 gated verify round-trips still pass.
