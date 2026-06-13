@@ -52,6 +52,7 @@ type FcrOpen = unsafe extern "C" fn(c_ulong, *mut c_ulong) -> CkRv;
 type FcrClose = unsafe extern "C" fn(c_ulong) -> CkRv;
 type FcrLogin = unsafe extern "C" fn(c_ulong, *const u8, c_ulong) -> CkRv;
 type FcrReadCert = unsafe extern "C" fn(c_ulong, *mut u8, *mut c_ulong) -> CkRv;
+type FcrModulusBits = unsafe extern "C" fn(c_ulong, *mut c_ulong) -> CkRv;
 #[allow(clippy::type_complexity)]
 type FcrSign = unsafe extern "C" fn(
     c_ulong,
@@ -100,10 +101,18 @@ impl MacroState {
             .map_err(|e| Error::Pkcs11(format!("fcr_open symbol: {e}")))?;
         let mut session: c_ulong = 0;
         ck(unsafe { open(slot_idx.unwrap_or(0) as c_ulong, &mut session) }, "fcr_open")?;
-        // BCCR Firma Digital cards are RSA-2048. The PAdES /Contents reservation
-        // over-allocates safely from this and the post-build guard catches any
-        // mismatch, so a fixed value is fine on the macro path.
-        Ok(Some(Self { lib, session, pin: None, modulus_bits: 2048 }))
+        // Query the real RSA key size (2048/4096) when the driver supports it
+        // (ABI v2+); else assume 2048 (BCCR's current cards). The PAdES /Contents
+        // reservation is sized from this; the post-build guard catches a mismatch.
+        let modulus_bits = unsafe { lib.get::<FcrModulusBits>(b"fcr_modulus_bits\0") }
+            .ok()
+            .and_then(|f| {
+                let mut bits: c_ulong = 0;
+                (unsafe { f(session, &mut bits) } == CKR_OK && bits > 0).then_some(bits as u32)
+            })
+            .unwrap_or(2048);
+        log::info!("pkcs11: macro backend, modulus_bits={modulus_bits}");
+        Ok(Some(Self { lib, session, pin: None, modulus_bits }))
     }
 
     fn sym<T>(&self, name: &[u8]) -> Result<libloading::Symbol<'_, T>> {
