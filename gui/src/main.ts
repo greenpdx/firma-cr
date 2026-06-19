@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open as tauriOpen } from "@tauri-apps/plugin-dialog";
+import { open as tauriOpen, save as tauriSave } from "@tauri-apps/plugin-dialog";
 import { placeSignature, type Placement } from "./place";
 
 // Tauri desktop shell vs. plain web app. In the browser, card ops go to the
@@ -95,6 +95,43 @@ function browserDownload(name: string, blob: Blob): void {
   a.click();
   log("descargar:", a.download);
   setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 10_000);
+}
+
+// Base64-encode a Blob's bytes (chunked to avoid call-stack limits) for passing
+// to a Tauri command — WebKitGTK ignores <a download>, so saving/printing has to
+// go through the Rust side.
+async function blobToB64(blob: Blob): Promise<string> {
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  let s = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < buf.length; i += CHUNK) {
+    s += String.fromCharCode(...buf.subarray(i, i + CHUNK));
+  }
+  return btoa(s);
+}
+
+// Save a blob to disk: in Tauri via the native save dialog + a Rust write
+// (the <a download> path is a no-op in the webview); in a browser, the anchor.
+async function saveBlob(name: string, blob: Blob): Promise<void> {
+  if (IS_TAURI) {
+    const path = await tauriSave({ defaultPath: name, filters: [{ name: "PDF", extensions: ["pdf"] }] });
+    if (!path) return; // user cancelled
+    await invoke("save_file", { path, dataB64: await blobToB64(blob) });
+    log("guardado:", path);
+  } else {
+    browserDownload(name, blob);
+  }
+}
+
+// Print a PDF: in Tauri, hand it to the system's default PDF app (where the user
+// prints) — the native viewer's toolbar is hidden; in a browser, open a tab.
+async function printBlob(blob: Blob): Promise<void> {
+  if (IS_TAURI) {
+    const path = await invoke<string>("open_pdf", { dataB64: await blobToB64(blob) });
+    log("abrir para imprimir:", path);
+  } else {
+    window.open(URL.createObjectURL(blob), "_blank");
+  }
 }
 /// Full /dyn cryptoshell PDF sign. Returns the signed PDF.
 // Signature placement model:
@@ -218,7 +255,32 @@ $("cfg-save").addEventListener("click", () => {
   dialog.close();
 });
 $("cfg-close").addEventListener("click", () => dialog.close());
-$("btn-quit").addEventListener("click", () => { if (IS_TAURI) void invoke("quit_app"); else window.close(); });
+function quitApp(): void { if (IS_TAURI) void invoke("quit_app"); else window.close(); }
+$("btn-quit").addEventListener("click", quitApp);
+
+// ── ☰ menu (top-left): toggle + actions ──────────────────────────────────
+const menuPop = $("menu-pop");
+const btnMenu = $("btn-menu");
+function closeMenu(): void { menuPop.hidden = true; btnMenu.setAttribute("aria-expanded", "false"); }
+btnMenu.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const open = menuPop.hidden;
+  menuPop.hidden = !open;
+  btnMenu.setAttribute("aria-expanded", String(open));
+});
+menuPop.addEventListener("click", (e) => {
+  const item = (e.target as HTMLElement).closest<HTMLElement>("[data-action]");
+  if (!item) return;
+  closeMenu();
+  switch (item.dataset.action) {
+    case "config": $("btn-config").click(); break;
+    case "quit": quitApp(); break;
+  }
+});
+document.addEventListener("click", (e) => {
+  if (!menuPop.hidden && !menuPop.contains(e.target as Node) && e.target !== btnMenu) closeMenu();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
 
 // ---- Tab 1: Firmar — the sign queue --------------------------------------
 type Status = "pending" | "signed" | "error";
@@ -324,7 +386,7 @@ function renderSigned(): void {
     view.addEventListener("click", () => openDoc(d.name, d.blob, d.signer));
     const dl = document.createElement("button");
     dl.className = "small"; dl.textContent = "⬇"; dl.title = "Descargar";
-    dl.addEventListener("click", () => browserDownload(d.name, d.blob));
+    dl.addEventListener("click", () => void saveBlob(d.name, d.blob));
     li.append(view, dl);
     ul.appendChild(li);
   });
@@ -407,12 +469,28 @@ document.querySelectorAll<HTMLButtonElement>(".rail-btn").forEach((b) =>
 
 // ---- Tab 3: Documento — format-aware viewer ------------------------------
 let docUrl: string | null = null;
+// Clear the Documento viewer back to its empty state (the "Cerrar" button).
+// Does NOT quit the app — quitting lives in the ☰ menu / ⏻ button.
+function closeDoc(): void {
+  if (docUrl) { URL.revokeObjectURL(docUrl); docUrl = null; }
+  $("doc-title").textContent = "(ningún documento)";
+  $("doc-sig").hidden = true;
+  $("doc-view").innerHTML = `<p class="hint">Firma un documento y se mostrará aquí.</p>`;
+  for (const id of ["doc-save", "doc-print", "doc-close"]) $<HTMLButtonElement>(id).disabled = true;
+}
+$("doc-close").addEventListener("click", closeDoc);
+
 async function openDoc(name: string, blob: Blob, signer?: string): Promise<void> {
   showTab("documento");
   $("doc-title").textContent = name;
-  const dl = $<HTMLButtonElement>("doc-download");
-  dl.disabled = false;
-  dl.onclick = () => browserDownload(name, blob);
+  // Our own toolbar (Guardar / Imprimir / Cerrar) drives saving and printing;
+  // the native PDF toolbar (with its edit tools) is hidden via #toolbar=0.
+  const save = $<HTMLButtonElement>("doc-save");
+  const print = $<HTMLButtonElement>("doc-print");
+  save.disabled = print.disabled = false;
+  $<HTMLButtonElement>("doc-close").disabled = false;
+  save.onclick = () => void saveBlob(name, blob);
+  print.onclick = () => void printBlob(blob);
   // Signature status banner (who signed it).
   const sig = $("doc-sig");
   if (signer) {
@@ -427,14 +505,16 @@ async function openDoc(name: string, blob: Blob, signer?: string): Promise<void>
   const ext = (name.toLowerCase().split(".").pop() || "");
   if (ext === "pdf") {
     docUrl = URL.createObjectURL(new Blob([blob], { type: "application/pdf" }));
-    view.innerHTML = `<iframe src="${docUrl}#toolbar=1"></iframe>`;
+    // #toolbar=0 hides the native viewer's whole toolbar (edit tools + its own
+    // save/print) — our toolbar above replaces them.
+    view.innerHTML = `<iframe src="${docUrl}#toolbar=0"></iframe>`;
   } else if (ext === "txt") {
     const pre = document.createElement("pre");
     pre.textContent = await blob.text();
     view.innerHTML = "";
     view.appendChild(pre);
   } else {
-    view.innerHTML = `<div class="placeholder">Vista previa no disponible para «.${esc(ext)}».<br>Usa «Descargar» para abrirlo en tu aplicación.</div>`;
+    view.innerHTML = `<div class="placeholder">Vista previa no disponible para «.${esc(ext)}».<br>Usa «Guardar» para abrirlo en tu aplicación.</div>`;
   }
 }
 

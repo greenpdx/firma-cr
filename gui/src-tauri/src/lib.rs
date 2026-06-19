@@ -155,6 +155,59 @@ fn sign_pdf(
     ))
 }
 
+/// Write base64 bytes (from the webview) to `path`. The Documento tab's
+/// "Guardar" button routes here after the native save dialog picks a path —
+/// WebKitGTK ignores `<a download>`, so saving has to go through Rust.
+#[tauri::command]
+fn save_file(path: String, data_b64: String) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.as_bytes())
+        .map_err(|e| format!("decode payload: {e}"))?;
+    std::fs::write(&path, &bytes).map_err(|e| format!("write {path}: {e}"))?;
+    Ok(())
+}
+
+/// Write a PDF (base64 from the webview) to a temp file and open it in the
+/// system's default PDF application, where the user can print it. The Documento
+/// tab's "Imprimir" button routes here because the native viewer's own toolbar
+/// (and its print button) is hidden via `#toolbar=0`. Returns the temp path.
+#[tauri::command]
+fn open_pdf(data_b64: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.as_bytes())
+        .map_err(|e| format!("decode payload: {e}"))?;
+    let path = std::env::temp_dir().join("firma-cr-view.pdf");
+    std::fs::write(&path, &bytes).map_err(|e| format!("write temp PDF: {e}"))?;
+    open_in_default_app(&path)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Launch the OS's default handler for `path` (a PDF). Linux/macOS/Windows.
+fn open_in_default_app(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]).arg(path);
+        c
+    };
+    cmd.spawn().map_err(|e| format!("open in default app: {e}"))?;
+    Ok(())
+}
+
 /// Quit the whole process (the embedded /dyn agent stops with it). Wired to the
 /// window's "Salir" button so there is always an in-window way to exit, not only
 /// the tray menu (which may be invisible on some desktops).
@@ -213,7 +266,7 @@ pub fn run() {
         // Closing the window quits the whole process (the embedded /dyn agent
         // stops with it). The tray "Salir" item and the in-window "Salir" button
         // both call quit_app for the same effect.
-        .invoke_handler(tauri::generate_handler![card_info, sign_pdf, quit_app])
+        .invoke_handler(tauri::generate_handler![card_info, sign_pdf, quit_app, save_file, open_pdf])
         .run(tauri::generate_context!())
         .expect("error while running Firma CR tauri application");
 }

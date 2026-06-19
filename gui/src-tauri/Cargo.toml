@@ -20,6 +20,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 # The native backend: reuse the document-signing library directly. The Rust
 # backend calls the real CardClient + sign_pdf over the system PKCS#11 module.
 # The `agent` feature pulls in the embedded /dyn web-signing server so this one
