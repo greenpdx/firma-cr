@@ -1,7 +1,7 @@
 [package]
 name = "firma-cr-tauri"
 version = "0.0.1"
-edition = "2021"
+edition = "2024"
 authors = ["Shaun Savage <savages@crmep.com>"]
 description = "Tauri GUI front-end for firma-cr-pades (Phase 1: PAdES-B-B PDF signing via the BCCR card)"
 license = "GPL-3.0-or-later"
