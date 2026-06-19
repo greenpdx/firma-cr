@@ -1231,6 +1231,7 @@ dependencies = [
 name = "firma-cr-tauri"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "firma-cr-core",
  "serde",
  "serde_json",

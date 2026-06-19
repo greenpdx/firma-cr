@@ -8,7 +8,11 @@
   </head>
   <body>
     <header class="topbar">
-      <button id="btn-menu" class="icon" title="Menú">☰</button>
+      <button id="btn-menu" class="icon" title="Menú" aria-haspopup="true" aria-expanded="false">☰</button>
+      <div id="menu-pop" class="menu-pop" role="menu" hidden>
+        <button class="menu-item" data-action="config" role="menuitem">Configuración</button>
+        <button class="menu-item" data-action="quit" role="menuitem">Salir</button>
+      </div>
       <h1>Firma CR</h1>
       <nav class="tabs" id="tabs">
         <button class="tab active" data-tab="firmar">Firmar</button>
@@ -74,7 +78,9 @@
       <div class="doc-head">
         <span id="doc-title" class="col-title">(ningún documento)</span>
         <span class="spacer"></span>
-        <button id="doc-download" class="small" disabled>Descargar</button>
+        <button id="doc-save" class="small" disabled>Guardar</button>
+        <button id="doc-print" class="small" disabled>Imprimir</button>
+        <button id="doc-close" class="small" disabled>Cerrar</button>
       </div>
       <div id="doc-sig" class="doc-sig" hidden></div>
       <div id="doc-view" class="doc-view">

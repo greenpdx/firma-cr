@@ -30,7 +30,33 @@ body {
   padding: 0 10px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
+  position: relative; /* anchors the ☰ dropdown */
 }
+.menu-pop {
+  position: absolute;
+  top: var(--topbar-h);
+  left: 8px;
+  min-width: 160px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+  z-index: 1000;
+}
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  font: inherit;
+  color: var(--fg);
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.menu-item:hover { background: var(--head); }
 .topbar h1 { font-size: 16px; align-self: center; margin: 0 6px 0 0; }
 .spacer { flex: 1; }
 .tabs { display: flex; align-items: stretch; }
