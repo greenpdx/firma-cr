@@ -165,6 +165,22 @@ fn quit_app(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK on several Linux GPU stacks (Raspberry Pi / VC4, some Mesa and
+    // NVIDIA setups) paints the webview as corrupted horizontal scan-lines under
+    // its DMABUF-backed renderer — the page itself is fine (it renders correctly
+    // in a browser). Disabling the DMABUF renderer fixes it with negligible cost.
+    // Must be set before WebKitGTK initializes, i.e. before the Tauri builder
+    // creates the window. Linux-only; honor an explicit override if the operator
+    // already set the variable. If scan-lines persist on some hardware, also try
+    // WEBKIT_DISABLE_COMPOSITING_MODE=1 (heavier — disables GPU compositing).
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        // SAFETY: first line of run(), before any thread is spawned or WebKitGTK
+        // initializes — no concurrent env access. (env::set_var is unsafe in
+        // edition 2024.)
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
+
     // ONE shared card session for the whole process: the embedded /dyn agent
     // AND the GUI commands use it. crfirma's C_Initialize is a process-global
     // singleton, so there must be exactly one CardClient per process.

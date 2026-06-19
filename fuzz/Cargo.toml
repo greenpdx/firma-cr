@@ -2,7 +2,7 @@
 name = "firma-cr-fuzz"
 version = "0.0.0"
 publish = false
-edition = "2021"
+edition = "2024"
 authors = ["Shaun Savage <savages@crmep.com>"]
 license = "GPL-3.0-or-later"
 
