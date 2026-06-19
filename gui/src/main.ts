@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open as tauriOpen, save as tauriSave } from "@tauri-apps/plugin-dialog";
 import { placeSignature, type Placement } from "./place";
+import { renderPdf, type PdfViewer } from "./pdfview";
 
 // Tauri desktop shell vs. plain web app. In the browser, card ops go to the
 // local /dyn agent (SCManager-style HTTP backend) and files use upload/download.
@@ -468,11 +469,12 @@ document.querySelectorAll<HTMLButtonElement>(".rail-btn").forEach((b) =>
   }));
 
 // ---- Tab 3: Documento — format-aware viewer ------------------------------
-let docUrl: string | null = null;
+let docViewer: PdfViewer | null = null;
+function destroyDocViewer(): void { if (docViewer) { docViewer.destroy(); docViewer = null; } }
 // Clear the Documento viewer back to its empty state (the "Cerrar" button).
 // Does NOT quit the app — quitting lives in the ☰ menu / ⏻ button.
 function closeDoc(): void {
-  if (docUrl) { URL.revokeObjectURL(docUrl); docUrl = null; }
+  destroyDocViewer();
   $("doc-title").textContent = "(ningún documento)";
   $("doc-sig").hidden = true;
   $("doc-view").innerHTML = `<p class="hint">Firma un documento y se mostrará aquí.</p>`;
@@ -501,13 +503,17 @@ async function openDoc(name: string, blob: Blob, signer?: string): Promise<void>
     sig.hidden = true;
   }
   const view = $("doc-view");
-  if (docUrl) { URL.revokeObjectURL(docUrl); docUrl = null; }
+  destroyDocViewer();
   const ext = (name.toLowerCase().split(".").pop() || "");
   if (ext === "pdf") {
-    docUrl = URL.createObjectURL(new Blob([blob], { type: "application/pdf" }));
-    // #toolbar=0 hides the native viewer's whole toolbar (edit tools + its own
-    // save/print) — our toolbar above replaces them.
-    view.innerHTML = `<iframe src="${docUrl}#toolbar=0"></iframe>`;
+    // Our own pdf.js render — continuous scroll + zoom, and NO toolbar/edit
+    // tools (the native webview viewer ignores #toolbar=0 and always shows them).
+    view.innerHTML = "";
+    try {
+      docViewer = await renderPdf(view, await blob.arrayBuffer());
+    } catch (e) {
+      view.innerHTML = `<div class="placeholder">No se pudo mostrar el PDF: ${esc(String(e))}</div>`;
+    }
   } else if (ext === "txt") {
     const pre = document.createElement("pre");
     pre.textContent = await blob.text();

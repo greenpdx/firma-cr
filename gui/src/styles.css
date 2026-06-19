@@ -123,6 +123,14 @@ li.empty { color: var(--muted); font-style: italic; justify-content: center; }
 .doc-view pre { margin: 0; padding: 14px; white-space: pre-wrap; font-family: "DejaVu Sans Mono", monospace; font-size: 13px; flex: 1; }
 .doc-view .placeholder { margin: auto; color: var(--muted); text-align: center; padding: 24px; }
 
+/* Read-only pdf.js viewer (Documento) — continuous scroll + zoom, no edit tools. */
+.pdfv { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.pdfv-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--head); border-bottom: 1px solid var(--border); }
+.pdfv-bar .spacer, .pdfv-spacer { flex: 1; }
+.pdfv-zoom, .pdfv-page { font-size: 13px; color: var(--muted); min-width: 46px; text-align: center; }
+.pdfv-pages { flex: 1; overflow: auto; background: #525659; padding: 12px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.pdfv-canvas { background: #fff; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4); max-width: 100%; }
+
 /* ---- signature placement modal ---- */
 .place-backdrop { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .place-modal { background: var(--panel); border-radius: 10px; padding: 12px; max-width: 92vw; max-height: 92vh; display: flex; flex-direction: column; gap: 8px; }
