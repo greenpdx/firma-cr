@@ -20,8 +20,21 @@ pub fn verify_pdf(
     trust_root: &SignerCert,
     opts: VerifyOptions,
 ) -> Result<VerifyReport> {
+    verify_pdf_ex(pdf, trust_root, &[], opts)
+}
+
+/// Like [`verify_pdf`] but with `extra_intermediates`: additional CA certs
+/// (the bundled BCCR policy CAs) used to bridge a leaf-only signature to the
+/// trust root.
+pub fn verify_pdf_ex(
+    pdf: &[u8],
+    trust_root: &SignerCert,
+    extra_intermediates: &[SignerCert],
+    opts: VerifyOptions,
+) -> Result<VerifyReport> {
     let (byterange_data, cms_der, sig_cov_end) = extract_sig_payload(pdf)?;
-    let mut report = verify_cms::verify_detached(&cms_der, &byterange_data, trust_root, opts)?;
+    let mut report =
+        verify_cms::verify_detached_ex(&cms_der, &byterange_data, trust_root, extra_intermediates, opts)?;
 
     // ---- PAdES-LTA — embedded /Type /DocTimeStamp ----
     // Coverage policy (defeats appended-content forgery): the outermost coverage

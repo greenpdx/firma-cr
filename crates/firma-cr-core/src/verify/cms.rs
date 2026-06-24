@@ -66,6 +66,19 @@ pub fn verify_detached(
     trust_root: &SignerCert,
     opts: VerifyOptions,
 ) -> Result<VerifyReport> {
+    verify_detached_ex(p7s, content, trust_root, &[], opts)
+}
+
+/// Like [`verify_detached`] but with `extra_intermediates`: additional CA certs
+/// (e.g. the bundled BCCR policy CAs) added to the chain-building pool, so a
+/// signature that embeds only the leaf still chains to the trust root.
+pub fn verify_detached_ex(
+    p7s: &[u8],
+    content: &[u8],
+    trust_root: &SignerCert,
+    extra_intermediates: &[SignerCert],
+    opts: VerifyOptions,
+) -> Result<VerifyReport> {
     // 1. Parse.
     let ci = ContentInfo::from_der(p7s)
         .map_err(|e| Error::Cms(format!("ContentInfo decode: {e}")))?;
@@ -109,7 +122,7 @@ pub fn verify_detached(
     // 3. Per-signer verification.
     let mut signers: Vec<SignerVerdict> = Vec::new();
     for si in sd.signer_infos.0.as_slice() {
-        let verdict = verify_one_signer(si, &sd, &certs, content, trust_root, opts)?;
+        let verdict = verify_one_signer(si, &sd, &certs, content, trust_root, extra_intermediates, opts)?;
         signers.push(verdict);
     }
 
@@ -159,6 +172,7 @@ fn verify_one_signer(
     certs: &[SignerCert],
     content: &[u8],
     trust_root: &SignerCert,
+    extra_intermediates: &[SignerCert],
     opts: VerifyOptions,
 ) -> Result<SignerVerdict> {
     let signer = match locate_signer(&si.sid, certs) {
@@ -330,10 +344,25 @@ fn verify_one_signer(
         }
     }
 
-    // Walk the chain.
-    let intermediate_refs: Vec<&SignerCert> =
+    // Walk the chain. The signer cert often embeds only itself (the BCCR card
+    // does), so the policy-CA intermediate bridging it to the root is missing.
+    // When `fetch_aia` is set, pull the missing issuer(s) from the cert's
+    // AIA `caIssuers` URL and retry before giving up.
+    let mut intermediate_refs: Vec<&SignerCert> =
         certs.iter().filter(|c| !std::ptr::eq(*c, signer)).collect();
-    let chain_result = chain::build_and_verify_chain(signer, &intermediate_refs, &[trust_root]);
+    // Caller-supplied intermediates (bundled BCCR policy CAs) bridge a leaf-only
+    // signature to the trust root.
+    intermediate_refs.extend(extra_intermediates.iter());
+    let mut chain_result = chain::build_and_verify_chain(signer, &intermediate_refs, &[trust_root]);
+    let aia_certs: Vec<SignerCert> = if chain_result.is_err() && opts.fetch_aia {
+        crate::revocation::aia::fetch_issuer_chain(signer, 4).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if !aia_certs.is_empty() {
+        intermediate_refs.extend(aia_certs.iter());
+        chain_result = chain::build_and_verify_chain(signer, &intermediate_refs, &[trust_root]);
+    }
     if let Err(e) = chain_result {
         warnings.push(format!("chain build failed: {e}"));
         return Ok(SignerVerdict {

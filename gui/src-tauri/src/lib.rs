@@ -221,14 +221,15 @@ fn verify_pdf(state: State<Shared>, data_b64: String) -> Result<String, String> 
         let g = state.lock().map_err(|_| "card state poisoned".to_string())?;
         g.active_ca().to_string()
     };
-    let root = firma_cr_core::cert::SignerCert::from_pem_str(&ca)
-        .map_err(|e| format!("active CA chain invalid: {e}"))?;
-    let report = firma_cr_core::verify::pades::verify_pdf(
-        &pdf,
-        &root,
-        firma_cr_core::verify::VerifyOptions::default(),
-    )
-    .map_err(|e| e.to_string())?;
+    let mut certs = firma_cr_core::cert::SignerCert::chain_from_pem_str(&ca);
+    if certs.is_empty() {
+        return Err("active CA chain has no certificate".to_string());
+    }
+    let root_pos = certs.iter().position(|c| c.is_self_signed()).unwrap_or(0);
+    let root = certs.remove(root_pos);
+    let opts = firma_cr_core::verify::VerifyOptions { fetch_aia: true, ..Default::default() };
+    let report =
+        firma_cr_core::verify::pades::verify_pdf_ex(&pdf, &root, &certs, opts).map_err(|e| e.to_string())?;
     serde_json::to_string(&report).map_err(|e| e.to_string())
 }
 
@@ -236,8 +237,9 @@ fn verify_pdf(state: State<Shared>, data_b64: String) -> Result<String, String> 
 /// default is never touched. Returns the new ca_info JSON.
 #[tauri::command]
 fn set_ca(state: State<Shared>, ca_pem: String) -> Result<String, String> {
-    firma_cr_core::cert::SignerCert::from_pem_str(&ca_pem)
-        .map_err(|e| format!("CA chain does not parse: {e}"))?;
+    if firma_cr_core::cert::SignerCert::chain_from_pem_str(&ca_pem).is_empty() {
+        return Err("CA chain has no parseable certificate".to_string());
+    }
     let mut g = state.lock().map_err(|_| "card state poisoned".to_string())?;
     g.set_ca(ca_pem);
     Ok(firma_cr_core::agent::http::ca_info_json(&g).to_string())
