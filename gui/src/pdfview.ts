@@ -15,6 +15,15 @@ export interface PdfViewer {
   destroy(): void;
 }
 
+/// Page count of a PDF (reuses the configured worker) — for the Firmados info
+/// line, without mounting a full viewer.
+export async function pdfPageCount(bytes: ArrayBuffer): Promise<number> {
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise;
+  const n = doc.numPages;
+  void doc.destroy();
+  return n;
+}
+
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 5;
 const GAP = 12; // px between pages (keep in sync with .pdfv-pages gap)

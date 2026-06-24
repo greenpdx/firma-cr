@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open as tauriOpen, save as tauriSave } from "@tauri-apps/plugin-dialog";
 import { placeSignature, type Placement } from "./place";
-import { renderPdf, type PdfViewer } from "./pdfview";
+import { renderPdf, pdfPageCount, type PdfViewer } from "./pdfview";
 
 // Tauri desktop shell vs. plain web app. In the browser, card ops go to the
 // local /dyn agent (SCManager-style HTTP backend) and files use upload/download.
@@ -210,8 +210,8 @@ const CFG_KEY = "firma-cr.config";
 /// `loadConfig()` runs — it's read inside it, so it must be initialized first.
 const BCCR_TSA_URL = "https://tsa.firmadigital.go.cr/tsa";
 let cfg = loadConfig();
-function loadConfig(): { method: Method; module: string; p12: string; tsaEnabled: boolean; tsa: string } {
-  const defaults = { method: "pkcs11" as Method, module: "", p12: "", tsaEnabled: false, tsa: BCCR_TSA_URL };
+function loadConfig(): { method: Method; module: string; p12: string; tsaEnabled: boolean; tsa: string; caPem: string } {
+  const defaults = { method: "pkcs11" as Method, module: "", p12: "", tsaEnabled: false, tsa: BCCR_TSA_URL, caPem: "" };
   try {
     const raw = localStorage.getItem(CFG_KEY);
     if (raw) return { ...defaults, ...JSON.parse(raw) };
@@ -232,9 +232,35 @@ $("btn-config").addEventListener("click", () => {
   $<HTMLInputElement>("cfg-p12").value = cfg.p12;
   $<HTMLInputElement>("cfg-tsa-enable").checked = cfg.tsaEnabled;
   $<HTMLInputElement>("cfg-tsa-url").value = cfg.tsa;
+  pendingCa = null;
+  $<HTMLInputElement>("cfg-ca").value = caLabel(cfg.caPem);
   toggleMethodGroups();
   dialog.showModal();
 });
+
+// CA chain (BCCR) used to verify signatures — loaded as PEM text and stored
+// locally (it is a public certificate). A file <input> + FileReader works in
+// both the browser and the Tauri webview (no path-reading needed).
+const caInput = document.createElement("input");
+caInput.type = "file";
+caInput.accept = ".pem,.crt,.cer,.der,application/x-pem-file,application/pkix-cert";
+caInput.style.cssText = "position:fixed;left:-9999px;opacity:0;width:1px;height:1px";
+document.body.appendChild(caInput);
+let pendingCa: string | null = null; // null = unchanged while the dialog is open
+function caLabel(pem: string): string {
+  if (!pem) return "(ninguna cargada)";
+  const certs = (pem.match(/-----BEGIN CERTIFICATE-----/g) || []).length;
+  return `cargada (${certs} cert${certs === 1 ? "" : "s"}, ${pem.length} B)`;
+}
+caInput.addEventListener("change", () => {
+  const f = caInput.files?.[0];
+  caInput.value = "";
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => { pendingCa = String(rd.result || ""); $<HTMLInputElement>("cfg-ca").value = caLabel(pendingCa); log("CA cargada:", f.name); };
+  rd.readAsText(f);
+});
+$("cfg-pick-ca").addEventListener("click", () => caInput.click());
 document.querySelectorAll('input[name="method"]').forEach((el) => el.addEventListener("change", toggleMethodGroups));
 $("cfg-pick-module").addEventListener("click", async () => {
   if (!IS_TAURI) return;
@@ -252,6 +278,7 @@ $("cfg-save").addEventListener("click", () => {
   cfg.p12 = $<HTMLInputElement>("cfg-p12").value;
   cfg.tsaEnabled = $<HTMLInputElement>("cfg-tsa-enable").checked;
   cfg.tsa = $<HTMLInputElement>("cfg-tsa-url").value.trim();
+  if (pendingCa !== null) cfg.caPem = pendingCa;
   localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
   dialog.close();
 });
@@ -287,7 +314,90 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(
 type Status = "pending" | "signed" | "error";
 interface QItem { file: File; name: string; status: Status; error?: string; placement?: Placement | null; }
 let queue: QItem[] = [];
-let signedDocs: { name: string; blob: Blob; signer: string }[] = [];
+type SignedDoc = { name: string; blob: Blob; signer?: string; info?: string };
+let signedDocs: SignedDoc[] = [];
+
+// "Cargar…" in Firmados: load an external signed PDF into the list to verify it.
+const verifyInput = document.createElement("input");
+verifyInput.type = "file";
+verifyInput.accept = ".pdf,application/pdf";
+verifyInput.multiple = true;
+verifyInput.style.cssText = "position:fixed;left:-9999px;opacity:0;width:1px;height:1px";
+document.body.appendChild(verifyInput);
+verifyInput.addEventListener("change", () => {
+  const picked = Array.from(verifyInput.files ?? []);
+  verifyInput.value = "";
+  for (const f of picked) signedDocs.unshift({ name: f.name, blob: f });
+  if (picked.length) { log("cargado para verificar:", picked.map((f) => f.name).join(", ")); renderSigned(); }
+});
+$("btn-load-verify").addEventListener("click", () => { verifyInput.value = ""; verifyInput.click(); });
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// Compact PDF metadata line for a Firmados row (client-side; no card/CA): PDF
+// version (header), page count (pdf.js), size, and signature-field count
+// (count of `/ByteRange` — one per signature). Cached on the doc once computed.
+async function pdfInfoLine(d: SignedDoc): Promise<string> {
+  try {
+    const buf = await d.blob.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    const ver = new TextDecoder("latin1").decode(bytes.subarray(0, 1024)).match(/%PDF-(\d\.\d)/)?.[1] ?? "?";
+    const sigs = (new TextDecoder("latin1").decode(bytes).match(/\/ByteRange/g) || []).length;
+    let pages = "?";
+    try { pages = String(await pdfPageCount(buf)); } catch { /* not parseable as PDF */ }
+    return `PDF ${ver} · ${pages} pág · ${fmtBytes(d.blob.size)} · ${sigs} firma${sigs === 1 ? "" : "s"}`;
+  } catch {
+    return "(no se pudo leer el PDF)";
+  }
+}
+
+// Call the verifier (Tauri command or /dyn route) and return the report JSON.
+async function callVerify(blob: Blob): Promise<string> {
+  const pdfB64 = await blobToB64(blob);
+  if (IS_TAURI) return await invoke<string>("verify_pdf", { dataB64: pdfB64, caPem: cfg.caPem });
+  const r = await fetchT(`${DYN}/dyn/verify_pdf`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pdf_b64: pdfB64, ca_pem: cfg.caPem }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return await r.text();
+}
+
+function renderVerdictHtml(rep: any): string {
+  const cn = rep.signer_subject ? (String(rep.signer_subject).match(/CN=([^,]+)/i)?.[1] || rep.signer_subject) : "—";
+  const rows = [
+    `<div class="verdict ${rep.ok ? "ok" : "bad"}">${rep.ok ? "✔ FIRMA VÁLIDA" : "✘ FIRMA NO VÁLIDA"}</div>`,
+    `<div><b>firmante:</b> ${esc(cn)}</div>`,
+  ];
+  if (rep.signer_subject) rows.push(`<div class="muted">${esc(rep.signer_subject)}</div>`);
+  if (rep.signing_time) rows.push(`<div><b>fecha de firma:</b> ${esc(rep.signing_time)}</div>`);
+  rows.push(`<div><b>sello de tiempo:</b> ${rep.has_timestamp ? (rep.timestamp?.ok ? "✔" : "✘") + (rep.timestamp?.gen_time ? " · " + esc(rep.timestamp.gen_time) : "") : "—"}</div>`);
+  if (rep.revocation) rows.push(`<div><b>revocación:</b> ${rep.revocation.ok ? "✔" : "✘"}</div>`);
+  for (const w of (rep.warnings ?? [])) rows.push(`<div class="warn">⚠ ${esc(String(w))}</div>`);
+  return rows.join("");
+}
+
+// Verify a row's PDF and render the verdict inline in its detail panel; a second
+// click on Verificar collapses it.
+async function verifyInto(d: SignedDoc, detail: HTMLElement): Promise<void> {
+  if (!detail.hidden && detail.dataset.done === "1") { detail.hidden = true; return; }
+  detail.hidden = false;
+  if (!d.name.toLowerCase().endsWith(".pdf")) { detail.innerHTML = `<div class="warn">Por ahora solo se verifican PDF (PAdES).</div>`; return; }
+  if (!cfg.caPem) { detail.innerHTML = `<div class="warn">⚙ Carga la cadena CA del BCCR en Configuración para verificar.</div>`; return; }
+  detail.textContent = "verificando…";
+  try {
+    detail.innerHTML = renderVerdictHtml(JSON.parse(await callVerify(d.blob)));
+    detail.dataset.done = "1";
+  } catch (e) {
+    detail.innerHTML = `<div class="verdict bad">ERROR</div><div class="muted">${esc(String(e))}</div>`;
+    console.error("[firma-cr] verify ✗", d.name, e);
+  }
+}
 
 const fileInput = document.createElement("input");
 fileInput.type = "file";
@@ -381,14 +491,33 @@ function renderSigned(): void {
   if (!signedDocs.length) { ul.innerHTML = '<li class="empty">Los documentos firmados aparecerán aquí.</li>'; return; }
   signedDocs.forEach((d) => {
     const li = document.createElement("li");
-    li.innerHTML = `<span class="name">${esc(d.name)}</span>`;
+    li.className = "signed-li";
+
+    const row = document.createElement("div");
+    row.className = "srow";
+    row.innerHTML = `<span class="name">${esc(d.name)}</span>`;
     const view = document.createElement("button");
     view.className = "small"; view.textContent = "Ver";
     view.addEventListener("click", () => openDoc(d.name, d.blob, d.signer));
+    const vf = document.createElement("button");
+    vf.className = "small"; vf.textContent = "Verificar";
     const dl = document.createElement("button");
     dl.className = "small"; dl.textContent = "⬇"; dl.title = "Descargar";
     dl.addEventListener("click", () => void saveBlob(d.name, d.blob));
-    li.append(view, dl);
+    row.append(view, vf, dl);
+
+    // Auto PDF-info line (cached on the doc after first compute).
+    const info = document.createElement("div");
+    info.className = "sinfo";
+    if (d.info) info.textContent = d.info;
+    else { info.textContent = "analizando…"; void pdfInfoLine(d).then((s) => { d.info = s; info.textContent = s; }); }
+
+    // Inline signature verdict, toggled by Verificar.
+    const detail = document.createElement("div");
+    detail.className = "sdetail"; detail.hidden = true;
+    vf.addEventListener("click", () => void verifyInto(d, detail));
+
+    li.append(row, info, detail);
     ul.appendChild(li);
   });
 }

@@ -102,6 +102,18 @@ button:disabled { opacity: 0.5; cursor: default; }
 .doclist li .badge.pending { background: #fef9c3; color: #854d0e; }
 li.empty { color: var(--muted); font-style: italic; justify-content: center; }
 
+/* Firmados rows: name+buttons, an auto PDF-info line, and an inline verdict. */
+#list-signed li.signed-li { flex-direction: column; align-items: stretch; gap: 5px; }
+.srow { display: flex; align-items: center; gap: 8px; }
+.srow .name { flex: 1; word-break: break-all; }
+.sinfo { font-size: 12px; color: var(--muted); }
+.sdetail { font-size: 13px; line-height: 1.5; background: var(--head); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+.sdetail .verdict { font-weight: 700; margin-bottom: 3px; }
+.sdetail .verdict.ok { color: #166534; }
+.sdetail .verdict.bad { color: #991b1b; }
+.sdetail .muted { color: var(--muted); font-size: 12px; word-break: break-all; }
+.sdetail .warn { color: #b45309; }
+
 /* ---- Tab 2: Tarjeta — rail | list | detail ---- */
 .mgr { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 52px 240px 1fr; gap: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .rail { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 0; background: var(--head); border-right: 1px solid var(--border); }

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
-use axum::extract::{Request, RawQuery, State};
+use axum::extract::{DefaultBodyLimit, Request, RawQuery, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -155,6 +155,10 @@ pub fn app_with_state(state: Shared) -> Router {
         .route("/dyn/cryptoshell_add_file", post(add_file))
         .route("/dyn/cryptoshell_build", get(build))
         .route("/dyn/download", get(download))
+        .route("/dyn/verify_pdf", post(verify_pdf))
+        // Allow large PDFs/uploads (the JSON verify body + add_file's 32 MiB
+        // cap). axum's default request-body limit is 2 MiB, too small here.
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .layer(cors)
         // Outermost: reject non-loopback Host headers. CORS lets *any web origin*
         // call us (BCCR sites must), but that plus a 127.0.0.1 bind leaves us open
@@ -252,6 +256,32 @@ fn boom(msg: impl ToString) -> Response {
 // ---------------------------------------------------------------------------
 // handlers
 // ---------------------------------------------------------------------------
+
+/// `POST /dyn/verify_pdf` — verify a PAdES PDF against a caller-supplied CA chain.
+/// Body: JSON `{ "pdf_b64": "...", "ca_pem": "-----BEGIN CERTIFICATE-----\n..." }`.
+/// No card/PIN — pure verification. Returns the `VerifyReport` as JSON. Mirrors
+/// the Tauri `verify_pdf` command so the GUI works the same in the browser.
+#[derive(serde::Deserialize)]
+struct VerifyPdfReq {
+    pdf_b64: String,
+    ca_pem: String,
+}
+
+async fn verify_pdf(Json(req): Json<VerifyPdfReq>) -> Response {
+    use base64::Engine;
+    let pdf = match base64::engine::general_purpose::STANDARD.decode(req.pdf_b64.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => return bad(format!("decode PDF: {e}")),
+    };
+    let root = match crate::cert::SignerCert::from_pem_str(&req.ca_pem) {
+        Ok(c) => c,
+        Err(e) => return bad(format!("CA chain: {e}")),
+    };
+    match crate::verify::pades::verify_pdf(&pdf, &root, crate::verify::VerifyOptions::default()) {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => boom(format!("verify: {e}")),
+    }
+}
 
 async fn ok_true() -> Response {
     Json(json!({ "ok": true })).into_response()

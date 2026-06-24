@@ -41,6 +41,7 @@
         <div class="col">
           <div class="col-head">
             <span class="col-title">Firmados</span>
+            <button id="btn-load-verify" class="small" title="Cargar un PDF firmado para verificarlo">Cargar…</button>
             <button id="btn-clear-signed" class="small">Limpiar</button>
           </div>
           <ul id="list-signed" class="doclist">
@@ -114,6 +115,16 @@
           </label>
           <p class="warn">⚠ El backend aún no firma con PKCS#12.</p>
         </div>
+        <fieldset>
+          <legend>Verificación</legend>
+          <label>Cadena CA del BCCR (.pem) — para verificar firmas
+            <div class="row">
+              <input id="cfg-ca" type="text" placeholder="(ninguna cargada)" readonly />
+              <button type="button" id="cfg-pick-ca">Cargar…</button>
+            </div>
+          </label>
+          <p class="hint">Raíz/cadena nacional del BCCR. Necesaria para «Verificar» en Firmados. Se guarda localmente en el navegador (es un certificado público).</p>
+        </fieldset>
         <fieldset>
           <legend>Sellado de tiempo (TSA)</legend>
           <label class="inline"><input id="cfg-tsa-enable" type="checkbox" /> Añadir sello de tiempo (PAdES-T)</label>
