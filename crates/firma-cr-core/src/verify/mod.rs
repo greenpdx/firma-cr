@@ -180,4 +180,10 @@ pub struct VerifyOptions {
     /// legitimately carry no revocation data) passing, and a *present-but-failing*
     /// revocation check is always a hard failure regardless of this flag.
     pub require_revocation: bool,
+    /// When `true`, if the embedded certs don't bridge the signer to the trust
+    /// root, fetch the missing issuer(s) from the cert's AIA `caIssuers` URL and
+    /// retry the chain build. Needed for signatures that embed only the leaf
+    /// (the BCCR card does), where the policy-CA intermediate must be fetched.
+    /// Default `false` (offline). Requires network.
+    pub fetch_aia: bool,
 }

@@ -310,11 +310,16 @@ async fn verify_pdf(State(st): State<Shared>, Json(req): Json<VerifyPdfReq>) -> 
         Ok(g) => g.active_ca().to_string(),
         Err(_) => return boom("state poisoned"),
     };
-    let root = match crate::cert::SignerCert::from_pem_str(&ca) {
-        Ok(c) => c,
-        Err(e) => return boom(format!("active CA chain invalid: {e}")),
-    };
-    match crate::verify::pades::verify_pdf(&pdf, &root, crate::verify::VerifyOptions::default()) {
+    let mut certs = crate::cert::SignerCert::chain_from_pem_str(&ca);
+    if certs.is_empty() {
+        return boom("active CA chain has no certificate");
+    }
+    // Trust anchor = the self-signed root; the rest (policy CAs) are extra
+    // intermediates that bridge a leaf-only signature to the root.
+    let root_pos = certs.iter().position(|c| c.is_self_signed()).unwrap_or(0);
+    let root = certs.remove(root_pos);
+    let opts = crate::verify::VerifyOptions { fetch_aia: true, ..Default::default() };
+    match crate::verify::pades::verify_pdf_ex(&pdf, &root, &certs, opts) {
         Ok(report) => Json(report).into_response(),
         Err(e) => boom(format!("verify: {e}")),
     }
@@ -327,8 +332,8 @@ async fn set_ca(State(st): State<Shared>, body: Bytes) -> Response {
         return bad("CA too large");
     }
     let pem = String::from_utf8_lossy(&body).into_owned();
-    if let Err(e) = crate::cert::SignerCert::from_pem_str(&pem) {
-        return bad(format!("CA chain does not parse: {e}"));
+    if crate::cert::SignerCert::chain_from_pem_str(&pem).is_empty() {
+        return bad("CA chain has no parseable certificate");
     }
     match st.lock() {
         Ok(mut g) => {
@@ -362,17 +367,19 @@ async fn ca_info(State(st): State<Shared>) -> Response {
 /// Describe the active verification CA (default vs override, subject, SHA-256)
 /// as JSON — shared by the `/dyn/ca_info` route and the Tauri `ca_info` command.
 pub fn ca_info_json(g: &AppState) -> serde_json::Value {
-    match crate::cert::SignerCert::from_pem_str(g.active_ca()) {
-        Ok(c) => {
+    let certs = crate::cert::SignerCert::chain_from_pem_str(g.active_ca());
+    // Describe the trust anchor (self-signed root, else the first cert).
+    match certs.iter().find(|c| c.is_self_signed()).or_else(|| certs.first()) {
+        Some(c) => {
             let fp = c
                 .cert_digest(crate::digest::HashAlgo::Sha256)
                 .iter()
                 .map(|b| format!("{b:02X}"))
                 .collect::<Vec<_>>()
                 .join(":");
-            json!({ "ok": true, "default": g.ca_is_default(), "subject": c.subject_string(), "sha256": fp })
+            json!({ "ok": true, "default": g.ca_is_default(), "count": certs.len(), "subject": c.subject_string(), "sha256": fp })
         }
-        Err(e) => json!({ "ok": false, "default": g.ca_is_default(), "error": e.to_string() }),
+        None => json!({ "ok": false, "default": g.ca_is_default(), "error": "no certificate in CA chain" }),
     }
 }
 

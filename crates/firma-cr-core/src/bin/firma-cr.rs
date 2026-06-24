@@ -662,6 +662,7 @@ fn run_verify(cmd: &VerifyCmd) -> firma_cr_core::Result<()> {
         cert_internal: vopts.cert_internal,
         validation_time,
         require_revocation: vopts.require_revocation,
+        fetch_aia: false,
     };
     let report = match cmd {
         VerifyCmd::Cms { content, .. } => {

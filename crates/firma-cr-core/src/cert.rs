@@ -73,6 +73,31 @@ impl SignerCert {
         Ok(Self { der, parsed })
     }
 
+    /// Parse every `CERTIFICATE` block in a PEM string, in order. Blocks that
+    /// don't parse are skipped. Used to load a multi-cert trust chain (root +
+    /// policy CAs) from one PEM.
+    pub fn chain_from_pem_str(pem: &str) -> Vec<Self> {
+        const B: &str = "-----BEGIN CERTIFICATE-----";
+        const E: &str = "-----END CERTIFICATE-----";
+        let mut out = Vec::new();
+        let mut rest = pem;
+        while let Some(bi) = rest.find(B) {
+            let after = &rest[bi..];
+            let Some(ei) = after.find(E) else { break };
+            let end = ei + E.len();
+            if let Ok(c) = Self::from_pem_str(&after[..end]) {
+                out.push(c);
+            }
+            rest = &after[end..];
+        }
+        out
+    }
+
+    /// True if subject == issuer (a self-signed root certificate).
+    pub fn is_self_signed(&self) -> bool {
+        self.parsed.tbs_certificate.subject == self.parsed.tbs_certificate.issuer
+    }
+
     /// Subject DN as a printable RFC 4514 string.
     pub fn subject_string(&self) -> String {
         self.parsed.tbs_certificate.subject.to_string()
