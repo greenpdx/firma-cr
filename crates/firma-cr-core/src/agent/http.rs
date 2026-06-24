@@ -47,6 +47,12 @@ const MAX_FILES_PER_ENV: usize = 32;
 /// Max length of a caller-supplied file name.
 const MAX_NAME_LEN: usize = 255;
 
+/// The built-in default trust anchor for signature verification: the BCCR
+/// national root (`CA RAÍZ NACIONAL - COSTA RICA v2`). This is the immutable
+/// baseline — `set_ca` overlays an override on top of it and `reset_ca` returns
+/// here; the embedded chain itself is never modified.
+const DEFAULT_CA: &str = include_str!("bccr-ca.pem");
+
 /// Failed-login tracker for the rate limiter. There is ONE physical card per
 /// process, so this is tracked globally — NOT per env. (A per-env counter is
 /// useless: `create_env` is unauthenticated and unlimited, so an attacker just
@@ -68,6 +74,9 @@ pub struct AppState {
     signed: HashMap<String, Vec<SignedFile>>,
     module_path: PathBuf,
     login_throttle: Option<LoginThrottle>,
+    /// Verification trust anchor override. `None` = use the embedded
+    /// [`DEFAULT_CA`]; the embedded chain is never overwritten.
+    ca_override: Option<String>,
 }
 
 impl AppState {
@@ -79,7 +88,29 @@ impl AppState {
             signed: HashMap::new(),
             module_path,
             login_throttle: None,
+            ca_override: None,
         }
+    }
+
+    /// The CA chain (PEM) currently used to verify: the override if one is set,
+    /// else the built-in [`DEFAULT_CA`].
+    pub fn active_ca(&self) -> &str {
+        self.ca_override.as_deref().unwrap_or(DEFAULT_CA)
+    }
+
+    /// True when no override is set (the built-in default is in use).
+    pub fn ca_is_default(&self) -> bool {
+        self.ca_override.is_none()
+    }
+
+    /// Overlay a custom CA chain. Does NOT touch the embedded default.
+    pub fn set_ca(&mut self, pem: String) {
+        self.ca_override = Some(pem);
+    }
+
+    /// Drop the override → back to the embedded default.
+    pub fn reset_ca(&mut self) {
+        self.ca_override = None;
     }
 
     /// If logins are currently locked out (too many failures across the process),
@@ -156,6 +187,9 @@ pub fn app_with_state(state: Shared) -> Router {
         .route("/dyn/cryptoshell_build", get(build))
         .route("/dyn/download", get(download))
         .route("/dyn/verify_pdf", post(verify_pdf))
+        .route("/dyn/ca_info", get(ca_info))
+        .route("/dyn/set_ca", post(set_ca))
+        .route("/dyn/reset_ca", post(reset_ca))
         // Allow large PDFs/uploads (the JSON verify body + add_file's 32 MiB
         // cap). axum's default request-body limit is 2 MiB, too small here.
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
@@ -264,22 +298,81 @@ fn boom(msg: impl ToString) -> Response {
 #[derive(serde::Deserialize)]
 struct VerifyPdfReq {
     pdf_b64: String,
-    ca_pem: String,
 }
 
-async fn verify_pdf(Json(req): Json<VerifyPdfReq>) -> Response {
+async fn verify_pdf(State(st): State<Shared>, Json(req): Json<VerifyPdfReq>) -> Response {
     use base64::Engine;
     let pdf = match base64::engine::general_purpose::STANDARD.decode(req.pdf_b64.as_bytes()) {
         Ok(b) => b,
         Err(e) => return bad(format!("decode PDF: {e}")),
     };
-    let root = match crate::cert::SignerCert::from_pem_str(&req.ca_pem) {
+    let ca = match st.lock() {
+        Ok(g) => g.active_ca().to_string(),
+        Err(_) => return boom("state poisoned"),
+    };
+    let root = match crate::cert::SignerCert::from_pem_str(&ca) {
         Ok(c) => c,
-        Err(e) => return bad(format!("CA chain: {e}")),
+        Err(e) => return boom(format!("active CA chain invalid: {e}")),
     };
     match crate::verify::pades::verify_pdf(&pdf, &root, crate::verify::VerifyOptions::default()) {
         Ok(report) => Json(report).into_response(),
         Err(e) => boom(format!("verify: {e}")),
+    }
+}
+
+/// `POST /dyn/set_ca` — overlay a custom verification CA (PEM body). Validated
+/// before acceptance; the embedded default is never touched. Returns ca_info.
+async fn set_ca(State(st): State<Shared>, body: Bytes) -> Response {
+    if body.len() > MAX_UPLOAD_BYTES {
+        return bad("CA too large");
+    }
+    let pem = String::from_utf8_lossy(&body).into_owned();
+    if let Err(e) = crate::cert::SignerCert::from_pem_str(&pem) {
+        return bad(format!("CA chain does not parse: {e}"));
+    }
+    match st.lock() {
+        Ok(mut g) => {
+            g.set_ca(pem);
+            Json(ca_info_json(&g)).into_response()
+        }
+        Err(_) => boom("state poisoned"),
+    }
+}
+
+/// `POST /dyn/reset_ca` — drop the override, back to the embedded default.
+async fn reset_ca(State(st): State<Shared>) -> Response {
+    match st.lock() {
+        Ok(mut g) => {
+            g.reset_ca();
+            Json(ca_info_json(&g)).into_response()
+        }
+        Err(_) => boom("state poisoned"),
+    }
+}
+
+/// `GET /dyn/ca_info` — describe the active verification CA (default vs override,
+/// subject, SHA-256 fingerprint).
+async fn ca_info(State(st): State<Shared>) -> Response {
+    match st.lock() {
+        Ok(g) => Json(ca_info_json(&g)).into_response(),
+        Err(_) => boom("state poisoned"),
+    }
+}
+
+/// Describe the active verification CA (default vs override, subject, SHA-256)
+/// as JSON — shared by the `/dyn/ca_info` route and the Tauri `ca_info` command.
+pub fn ca_info_json(g: &AppState) -> serde_json::Value {
+    match crate::cert::SignerCert::from_pem_str(g.active_ca()) {
+        Ok(c) => {
+            let fp = c
+                .cert_digest(crate::digest::HashAlgo::Sha256)
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(":");
+            json!({ "ok": true, "default": g.ca_is_default(), "subject": c.subject_string(), "sha256": fp })
+        }
+        Err(e) => json!({ "ok": false, "default": g.ca_is_default(), "error": e.to_string() }),
     }
 }
 

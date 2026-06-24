@@ -2,7 +2,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as tauriOpen, save as tauriSave } from "@tauri-apps/plugin-dialog";
 import { placeSignature, type Placement } from "./place";
 import { renderPdf, pdfPageCount, type PdfViewer } from "./pdfview";
-import bundledCa from "./assets/bccr-chain.pem?raw";
 
 // Tauri desktop shell vs. plain web app. In the browser, card ops go to the
 // local /dyn agent (SCManager-style HTTP backend) and files use upload/download.
@@ -211,8 +210,8 @@ const CFG_KEY = "firma-cr.config";
 /// `loadConfig()` runs — it's read inside it, so it must be initialized first.
 const BCCR_TSA_URL = "https://tsa.firmadigital.go.cr/tsa";
 let cfg = loadConfig();
-function loadConfig(): { method: Method; module: string; p12: string; tsaEnabled: boolean; tsa: string; caPem: string } {
-  const defaults = { method: "pkcs11" as Method, module: "", p12: "", tsaEnabled: false, tsa: BCCR_TSA_URL, caPem: "" };
+function loadConfig(): { method: Method; module: string; p12: string; tsaEnabled: boolean; tsa: string } {
+  const defaults = { method: "pkcs11" as Method, module: "", p12: "", tsaEnabled: false, tsa: BCCR_TSA_URL };
   try {
     const raw = localStorage.getItem(CFG_KEY);
     if (raw) return { ...defaults, ...JSON.parse(raw) };
@@ -225,11 +224,42 @@ const moduleArg = () => (cfg.module.trim() === "" ? null : cfg.module.trim());
 // bundled with the app (src/assets/bccr-chain.pem). The bundle is only treated
 // as a default when it actually carries a certificate (the shipped placeholder
 // does not), so a missing default falls back to the "load a CA" prompt.
-const BUNDLED_CA_HAS_CERT = bundledCa.includes("-----BEGIN CERTIFICATE-----");
-function getCa(): string {
-  const override = cfg.caPem.trim();
-  if (override) return override;
-  return BUNDLED_CA_HAS_CERT ? bundledCa : "";
+// Extract clean PEM blocks (dropping comments / stray bytes) so the agent's CA
+// parser always gets data starting at -----BEGIN. "" if there are none.
+function extractPemBlocks(text: string): string {
+  const blocks = text.match(/-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----/g);
+  return blocks?.length ? blocks.join("\n") + "\n" : "";
+}
+
+// ── Verification CA lives in the AGENT (embedded BCCR default + an override).
+// The GUI only views/changes it; the embedded default is never overwritten.
+async function caInfo(): Promise<any> {
+  if (IS_TAURI) return JSON.parse(await invoke<string>("ca_info"));
+  const r = await fetchT(`${DYN}/dyn/ca_info`);
+  if (!r.ok) throw new Error(`ca_info: ${r.status}`);
+  return await r.json();
+}
+async function caSet(pem: string): Promise<any> {
+  if (IS_TAURI) return JSON.parse(await invoke<string>("set_ca", { caPem: pem }));
+  const r = await fetchT(`${DYN}/dyn/set_ca`, { method: "POST", body: pem });
+  if (!r.ok) throw new Error(`set_ca: ${r.status}: ${await r.text()}`);
+  return await r.json();
+}
+async function caReset(): Promise<any> {
+  if (IS_TAURI) return JSON.parse(await invoke<string>("reset_ca"));
+  const r = await fetchT(`${DYN}/dyn/reset_ca`, { method: "POST" });
+  if (!r.ok) throw new Error(`reset_ca: ${r.status}`);
+  return await r.json();
+}
+function caInfoLabel(info: any): string {
+  if (!info?.ok) return `(CA inválida: ${info?.error ?? "?"})`;
+  const cn = String(info.subject || "").match(/CN=([^,]+)/i)?.[1] || info.subject || "?";
+  return info.default ? `predeterminada (BCCR): ${cn}` : `propia: ${cn}`;
+}
+function refreshCaLabel(): void {
+  const el = $<HTMLInputElement>("cfg-ca");
+  el.value = "consultando…";
+  caInfo().then((info) => (el.value = caInfoLabel(info))).catch((e) => (el.value = `(agente no disponible: ${e})`));
 }
 const dialog = $<HTMLDialogElement>("config-dialog");
 const selectedMethod = () => (document.querySelector('input[name="method"]:checked') as HTMLInputElement).value as Method;
@@ -244,37 +274,26 @@ $("btn-config").addEventListener("click", () => {
   $<HTMLInputElement>("cfg-p12").value = cfg.p12;
   $<HTMLInputElement>("cfg-tsa-enable").checked = cfg.tsaEnabled;
   $<HTMLInputElement>("cfg-tsa-url").value = cfg.tsa;
-  pendingCa = null;
-  $<HTMLInputElement>("cfg-ca").value = caLabel(cfg.caPem);
+  refreshCaLabel();
   toggleMethodGroups();
   dialog.showModal();
 });
 
-// CA chain (BCCR) used to verify signatures — loaded as PEM text and stored
-// locally (it is a public certificate). A file <input> + FileReader works in
-// both the browser and the Tauri webview (no path-reading needed).
+// Loading a CA file pushes it to the AGENT immediately (set_ca); "Predeterminada"
+// resets the agent back to its embedded default. A file <input> + FileReader
+// works in both the browser and the Tauri webview (no path-reading needed).
 const caInput = document.createElement("input");
 caInput.type = "file";
 caInput.accept = ".pem,.crt,.cer,.der,application/x-pem-file,application/pkix-cert";
 caInput.style.cssText = "position:fixed;left:-9999px;opacity:0;width:1px;height:1px";
 document.body.appendChild(caInput);
-let pendingCa: string | null = null; // null = unchanged while the dialog is open
-// `override` is the user's loaded CA ("" = none → use the bundled default).
-function caLabel(override: string): string {
-  if (override) {
-    const certs = (override.match(/-----BEGIN CERTIFICATE-----/g) || []).length;
-    return `propia (${certs} cert${certs === 1 ? "" : "s"})`;
-  }
-  return BUNDLED_CA_HAS_CERT ? "predeterminada (BCCR, incluida en la app)" : "(ninguna — carga una)";
-}
 // Normalize a CA file (PEM *or* DER) to clean PEM text. Reading a DER/binary
 // cert as text injects NUL bytes that break PEM parsing — so we read bytes:
 // extract any PEM blocks verbatim (dropping surrounding junk), or wrap a raw
 // DER cert as a PEM CERTIFICATE block.
 function bytesToCaPem(bytes: Uint8Array): string {
-  const txt = new TextDecoder("latin1").decode(bytes);
-  const blocks = txt.match(/-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----/g);
-  if (blocks?.length) return blocks.join("\n") + "\n";
+  const pem = extractPemBlocks(new TextDecoder("latin1").decode(bytes));
+  if (pem) return pem;
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   const b64 = (btoa(bin).match(/.{1,64}/g) || []).join("\n");
@@ -284,16 +303,22 @@ caInput.addEventListener("change", () => {
   const f = caInput.files?.[0];
   caInput.value = "";
   if (!f) return;
+  const el = $<HTMLInputElement>("cfg-ca");
   const rd = new FileReader();
   rd.onload = () => {
-    pendingCa = bytesToCaPem(new Uint8Array(rd.result as ArrayBuffer));
-    $<HTMLInputElement>("cfg-ca").value = caLabel(pendingCa);
-    log("CA cargada:", f.name);
+    const pem = bytesToCaPem(new Uint8Array(rd.result as ArrayBuffer));
+    el.value = "aplicando…";
+    caSet(pem).then((info) => { el.value = caInfoLabel(info); log("CA aplicada al agente:", f.name); })
+      .catch((e) => { el.value = `(error: ${e})`; });
   };
   rd.readAsArrayBuffer(f);
 });
 $("cfg-pick-ca").addEventListener("click", () => caInput.click());
-$("cfg-reset-ca").addEventListener("click", () => { pendingCa = ""; $<HTMLInputElement>("cfg-ca").value = caLabel(""); });
+$("cfg-reset-ca").addEventListener("click", () => {
+  const el = $<HTMLInputElement>("cfg-ca");
+  el.value = "restableciendo…";
+  caReset().then((info) => (el.value = caInfoLabel(info))).catch((e) => (el.value = `(error: ${e})`));
+});
 document.querySelectorAll('input[name="method"]').forEach((el) => el.addEventListener("change", toggleMethodGroups));
 $("cfg-pick-module").addEventListener("click", async () => {
   if (!IS_TAURI) return;
@@ -311,7 +336,6 @@ $("cfg-save").addEventListener("click", () => {
   cfg.p12 = $<HTMLInputElement>("cfg-p12").value;
   cfg.tsaEnabled = $<HTMLInputElement>("cfg-tsa-enable").checked;
   cfg.tsa = $<HTMLInputElement>("cfg-tsa-url").value.trim();
-  if (pendingCa !== null) cfg.caPem = pendingCa;
   localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
   dialog.close();
 });
@@ -391,12 +415,11 @@ async function pdfInfoLine(d: SignedDoc): Promise<string> {
 // Call the verifier (Tauri command or /dyn route) and return the report JSON.
 async function callVerify(blob: Blob): Promise<string> {
   const pdfB64 = await blobToB64(blob);
-  const caPem = getCa();
-  if (IS_TAURI) return await invoke<string>("verify_pdf", { dataB64: pdfB64, caPem });
+  if (IS_TAURI) return await invoke<string>("verify_pdf", { dataB64: pdfB64 });
   const r = await fetchT(`${DYN}/dyn/verify_pdf`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pdf_b64: pdfB64, ca_pem: caPem }),
+    body: JSON.stringify({ pdf_b64: pdfB64 }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return await r.text();
@@ -422,7 +445,6 @@ async function verifyInto(d: SignedDoc, detail: HTMLElement): Promise<void> {
   if (!detail.hidden && detail.dataset.done === "1") { detail.hidden = true; return; }
   detail.hidden = false;
   if (!d.name.toLowerCase().endsWith(".pdf")) { detail.innerHTML = `<div class="warn">Por ahora solo se verifican PDF (PAdES).</div>`; return; }
-  if (!getCa()) { detail.innerHTML = `<div class="warn">⚙ No hay cadena CA del BCCR (ni predeterminada ni cargada). Cárgala en Configuración para verificar.</div>`; return; }
   detail.textContent = "verificando…";
   try {
     detail.innerHTML = renderVerdictHtml(JSON.parse(await callVerify(d.blob)));
