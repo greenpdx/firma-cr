@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open as tauriOpen, save as tauriSave } from "@tauri-apps/plugin-dialog";
 import { placeSignature, type Placement } from "./place";
-import { renderPdf, type PdfViewer } from "./pdfview";
+import { renderPdf, pdfPageCount, type PdfViewer } from "./pdfview";
 
 // Tauri desktop shell vs. plain web app. In the browser, card ops go to the
 // local /dyn agent (SCManager-style HTTP backend) and files use upload/download.
@@ -314,7 +314,8 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(
 type Status = "pending" | "signed" | "error";
 interface QItem { file: File; name: string; status: Status; error?: string; placement?: Placement | null; }
 let queue: QItem[] = [];
-let signedDocs: { name: string; blob: Blob; signer?: string }[] = [];
+type SignedDoc = { name: string; blob: Blob; signer?: string; info?: string };
+let signedDocs: SignedDoc[] = [];
 
 // "Cargar…" in Firmados: load an external signed PDF into the list to verify it.
 const verifyInput = document.createElement("input");
@@ -331,42 +332,69 @@ verifyInput.addEventListener("change", () => {
 });
 $("btn-load-verify").addEventListener("click", () => { verifyInput.value = ""; verifyInput.click(); });
 
-// Render a VerifyReport (from the Tauri command / /dyn route) as a readable block.
-function formatVerdict(name: string, rep: any): string {
-  const L: string[] = [`${rep.ok ? "✔ FIRMA VÁLIDA" : "✘ FIRMA NO VÁLIDA"} — ${name}`];
-  if (rep.signer_subject) {
-    const cn = String(rep.signer_subject).match(/CN=([^,]+)/i)?.[1] || rep.signer_subject;
-    L.push(`  firmante: ${cn}`);
-  }
-  if (rep.signing_time) L.push(`  fecha de firma: ${rep.signing_time}`);
-  if (rep.has_timestamp) L.push(`  sello de tiempo: ${rep.timestamp?.ok ? "✔" : "✘"}${rep.timestamp?.gen_time ? " · " + rep.timestamp.gen_time : ""}`);
-  if (rep.revocation) L.push(`  revocación: ${rep.revocation.ok ? "✔" : "✘"}`);
-  for (const w of (rep.warnings ?? [])) L.push(`  ⚠ ${w}`);
-  return L.join("\n");
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-async function verifyDoc(d: { name: string; blob: Blob }): Promise<void> {
-  const res = $("result");
-  if (!cfg.caPem) { res.textContent = "Para verificar, carga la cadena CA del BCCR en Configuración (⚙)."; return; }
-  if (!d.name.toLowerCase().endsWith(".pdf")) { res.textContent = "Por ahora solo se verifican PDF (PAdES)."; return; }
-  res.textContent = `verificando ${d.name}…`;
+// Compact PDF metadata line for a Firmados row (client-side; no card/CA): PDF
+// version (header), page count (pdf.js), size, and signature-field count
+// (count of `/ByteRange` — one per signature). Cached on the doc once computed.
+async function pdfInfoLine(d: SignedDoc): Promise<string> {
   try {
-    const pdfB64 = await blobToB64(d.blob);
-    let json: string;
-    if (IS_TAURI) {
-      json = await invoke<string>("verify_pdf", { dataB64: pdfB64, caPem: cfg.caPem });
-    } else {
-      const r = await fetchT(`${DYN}/dyn/verify_pdf`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pdf_b64: pdfB64, ca_pem: cfg.caPem }),
-      });
-      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
-      json = await r.text();
-    }
-    res.textContent = formatVerdict(d.name, JSON.parse(json));
+    const buf = await d.blob.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    const ver = new TextDecoder("latin1").decode(bytes.subarray(0, 1024)).match(/%PDF-(\d\.\d)/)?.[1] ?? "?";
+    const sigs = (new TextDecoder("latin1").decode(bytes).match(/\/ByteRange/g) || []).length;
+    let pages = "?";
+    try { pages = String(await pdfPageCount(buf)); } catch { /* not parseable as PDF */ }
+    return `PDF ${ver} · ${pages} pág · ${fmtBytes(d.blob.size)} · ${sigs} firma${sigs === 1 ? "" : "s"}`;
+  } catch {
+    return "(no se pudo leer el PDF)";
+  }
+}
+
+// Call the verifier (Tauri command or /dyn route) and return the report JSON.
+async function callVerify(blob: Blob): Promise<string> {
+  const pdfB64 = await blobToB64(blob);
+  if (IS_TAURI) return await invoke<string>("verify_pdf", { dataB64: pdfB64, caPem: cfg.caPem });
+  const r = await fetchT(`${DYN}/dyn/verify_pdf`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pdf_b64: pdfB64, ca_pem: cfg.caPem }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return await r.text();
+}
+
+function renderVerdictHtml(rep: any): string {
+  const cn = rep.signer_subject ? (String(rep.signer_subject).match(/CN=([^,]+)/i)?.[1] || rep.signer_subject) : "—";
+  const rows = [
+    `<div class="verdict ${rep.ok ? "ok" : "bad"}">${rep.ok ? "✔ FIRMA VÁLIDA" : "✘ FIRMA NO VÁLIDA"}</div>`,
+    `<div><b>firmante:</b> ${esc(cn)}</div>`,
+  ];
+  if (rep.signer_subject) rows.push(`<div class="muted">${esc(rep.signer_subject)}</div>`);
+  if (rep.signing_time) rows.push(`<div><b>fecha de firma:</b> ${esc(rep.signing_time)}</div>`);
+  rows.push(`<div><b>sello de tiempo:</b> ${rep.has_timestamp ? (rep.timestamp?.ok ? "✔" : "✘") + (rep.timestamp?.gen_time ? " · " + esc(rep.timestamp.gen_time) : "") : "—"}</div>`);
+  if (rep.revocation) rows.push(`<div><b>revocación:</b> ${rep.revocation.ok ? "✔" : "✘"}</div>`);
+  for (const w of (rep.warnings ?? [])) rows.push(`<div class="warn">⚠ ${esc(String(w))}</div>`);
+  return rows.join("");
+}
+
+// Verify a row's PDF and render the verdict inline in its detail panel; a second
+// click on Verificar collapses it.
+async function verifyInto(d: SignedDoc, detail: HTMLElement): Promise<void> {
+  if (!detail.hidden && detail.dataset.done === "1") { detail.hidden = true; return; }
+  detail.hidden = false;
+  if (!d.name.toLowerCase().endsWith(".pdf")) { detail.innerHTML = `<div class="warn">Por ahora solo se verifican PDF (PAdES).</div>`; return; }
+  if (!cfg.caPem) { detail.innerHTML = `<div class="warn">⚙ Carga la cadena CA del BCCR en Configuración para verificar.</div>`; return; }
+  detail.textContent = "verificando…";
+  try {
+    detail.innerHTML = renderVerdictHtml(JSON.parse(await callVerify(d.blob)));
+    detail.dataset.done = "1";
   } catch (e) {
-    res.textContent = `ERROR al verificar ${d.name}: ${e}`;
+    detail.innerHTML = `<div class="verdict bad">ERROR</div><div class="muted">${esc(String(e))}</div>`;
     console.error("[firma-cr] verify ✗", d.name, e);
   }
 }
@@ -463,17 +491,33 @@ function renderSigned(): void {
   if (!signedDocs.length) { ul.innerHTML = '<li class="empty">Los documentos firmados aparecerán aquí.</li>'; return; }
   signedDocs.forEach((d) => {
     const li = document.createElement("li");
-    li.innerHTML = `<span class="name">${esc(d.name)}</span>`;
+    li.className = "signed-li";
+
+    const row = document.createElement("div");
+    row.className = "srow";
+    row.innerHTML = `<span class="name">${esc(d.name)}</span>`;
     const view = document.createElement("button");
     view.className = "small"; view.textContent = "Ver";
     view.addEventListener("click", () => openDoc(d.name, d.blob, d.signer));
     const vf = document.createElement("button");
     vf.className = "small"; vf.textContent = "Verificar";
-    vf.addEventListener("click", () => void verifyDoc(d));
     const dl = document.createElement("button");
     dl.className = "small"; dl.textContent = "⬇"; dl.title = "Descargar";
     dl.addEventListener("click", () => void saveBlob(d.name, d.blob));
-    li.append(view, vf, dl);
+    row.append(view, vf, dl);
+
+    // Auto PDF-info line (cached on the doc after first compute).
+    const info = document.createElement("div");
+    info.className = "sinfo";
+    if (d.info) info.textContent = d.info;
+    else { info.textContent = "analizando…"; void pdfInfoLine(d).then((s) => { d.info = s; info.textContent = s; }); }
+
+    // Inline signature verdict, toggled by Verificar.
+    const detail = document.createElement("div");
+    detail.className = "sdetail"; detail.hidden = true;
+    vf.addEventListener("click", () => void verifyInto(d, detail));
+
+    li.append(row, info, detail);
     ul.appendChild(li);
   });
 }
