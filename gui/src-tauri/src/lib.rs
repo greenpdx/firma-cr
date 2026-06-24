@@ -208,17 +208,21 @@ fn open_in_default_app(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Verify a PAdES PDF (base64 from the webview) against a CA chain (PEM text).
-/// No card/PIN needed. Returns the `VerifyReport` as JSON. Mirrors the browser
-/// path's `/dyn/verify_pdf` agent route so the GUI behaves the same either way.
+/// Verify a PAdES PDF (base64 from the webview) against the **agent's** active CA
+/// (the embedded BCCR default, or the override set via `set_ca`). No card/PIN.
+/// Returns the `VerifyReport` as JSON. Same CA as the browser `/dyn/verify_pdf`.
 #[tauri::command]
-fn verify_pdf(data_b64: String, ca_pem: String) -> Result<String, String> {
+fn verify_pdf(state: State<Shared>, data_b64: String) -> Result<String, String> {
     use base64::Engine;
     let pdf = base64::engine::general_purpose::STANDARD
         .decode(data_b64.as_bytes())
         .map_err(|e| format!("decode PDF: {e}"))?;
-    let root = firma_cr_core::cert::SignerCert::from_pem_str(&ca_pem)
-        .map_err(|e| format!("CA chain: {e}"))?;
+    let ca = {
+        let g = state.lock().map_err(|_| "card state poisoned".to_string())?;
+        g.active_ca().to_string()
+    };
+    let root = firma_cr_core::cert::SignerCert::from_pem_str(&ca)
+        .map_err(|e| format!("active CA chain invalid: {e}"))?;
     let report = firma_cr_core::verify::pades::verify_pdf(
         &pdf,
         &root,
@@ -226,6 +230,32 @@ fn verify_pdf(data_b64: String, ca_pem: String) -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     serde_json::to_string(&report).map_err(|e| e.to_string())
+}
+
+/// Set the agent's verification CA override (PEM). Validated; the embedded
+/// default is never touched. Returns the new ca_info JSON.
+#[tauri::command]
+fn set_ca(state: State<Shared>, ca_pem: String) -> Result<String, String> {
+    firma_cr_core::cert::SignerCert::from_pem_str(&ca_pem)
+        .map_err(|e| format!("CA chain does not parse: {e}"))?;
+    let mut g = state.lock().map_err(|_| "card state poisoned".to_string())?;
+    g.set_ca(ca_pem);
+    Ok(firma_cr_core::agent::http::ca_info_json(&g).to_string())
+}
+
+/// Drop the CA override → back to the embedded default. Returns ca_info JSON.
+#[tauri::command]
+fn reset_ca(state: State<Shared>) -> Result<String, String> {
+    let mut g = state.lock().map_err(|_| "card state poisoned".to_string())?;
+    g.reset_ca();
+    Ok(firma_cr_core::agent::http::ca_info_json(&g).to_string())
+}
+
+/// Describe the active verification CA (default vs override, subject, SHA-256).
+#[tauri::command]
+fn ca_info(state: State<Shared>) -> Result<String, String> {
+    let g = state.lock().map_err(|_| "card state poisoned".to_string())?;
+    Ok(firma_cr_core::agent::http::ca_info_json(&g).to_string())
 }
 
 /// Quit the whole process (the embedded /dyn agent stops with it). Wired to the
@@ -302,7 +332,7 @@ pub fn run() {
         // Closing the window quits the whole process (the embedded /dyn agent
         // stops with it). The tray "Salir" item and the in-window "Salir" button
         // both call quit_app for the same effect.
-        .invoke_handler(tauri::generate_handler![card_info, sign_pdf, quit_app, save_file, open_pdf, verify_pdf])
+        .invoke_handler(tauri::generate_handler![card_info, sign_pdf, quit_app, save_file, open_pdf, verify_pdf, set_ca, reset_ca, ca_info])
         .run(tauri::generate_context!())
         .expect("error while running Firma CR tauri application");
 }
