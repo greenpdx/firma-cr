@@ -252,13 +252,30 @@ function caLabel(pem: string): string {
   const certs = (pem.match(/-----BEGIN CERTIFICATE-----/g) || []).length;
   return `cargada (${certs} cert${certs === 1 ? "" : "s"}, ${pem.length} B)`;
 }
+// Normalize a CA file (PEM *or* DER) to clean PEM text. Reading a DER/binary
+// cert as text injects NUL bytes that break PEM parsing — so we read bytes:
+// extract any PEM blocks verbatim (dropping surrounding junk), or wrap a raw
+// DER cert as a PEM CERTIFICATE block.
+function bytesToCaPem(bytes: Uint8Array): string {
+  const txt = new TextDecoder("latin1").decode(bytes);
+  const blocks = txt.match(/-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----/g);
+  if (blocks?.length) return blocks.join("\n") + "\n";
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  const b64 = (btoa(bin).match(/.{1,64}/g) || []).join("\n");
+  return `-----BEGIN CERTIFICATE-----\n${b64}\n-----END CERTIFICATE-----\n`;
+}
 caInput.addEventListener("change", () => {
   const f = caInput.files?.[0];
   caInput.value = "";
   if (!f) return;
   const rd = new FileReader();
-  rd.onload = () => { pendingCa = String(rd.result || ""); $<HTMLInputElement>("cfg-ca").value = caLabel(pendingCa); log("CA cargada:", f.name); };
-  rd.readAsText(f);
+  rd.onload = () => {
+    pendingCa = bytesToCaPem(new Uint8Array(rd.result as ArrayBuffer));
+    $<HTMLInputElement>("cfg-ca").value = caLabel(pendingCa);
+    log("CA cargada:", f.name);
+  };
+  rd.readAsArrayBuffer(f);
 });
 $("cfg-pick-ca").addEventListener("click", () => caInput.click());
 document.querySelectorAll('input[name="method"]').forEach((el) => el.addEventListener("change", toggleMethodGroups));
