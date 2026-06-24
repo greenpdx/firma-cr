@@ -208,6 +208,26 @@ fn open_in_default_app(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Verify a PAdES PDF (base64 from the webview) against a CA chain (PEM text).
+/// No card/PIN needed. Returns the `VerifyReport` as JSON. Mirrors the browser
+/// path's `/dyn/verify_pdf` agent route so the GUI behaves the same either way.
+#[tauri::command]
+fn verify_pdf(data_b64: String, ca_pem: String) -> Result<String, String> {
+    use base64::Engine;
+    let pdf = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.as_bytes())
+        .map_err(|e| format!("decode PDF: {e}"))?;
+    let root = firma_cr_core::cert::SignerCert::from_pem_str(&ca_pem)
+        .map_err(|e| format!("CA chain: {e}"))?;
+    let report = firma_cr_core::verify::pades::verify_pdf(
+        &pdf,
+        &root,
+        firma_cr_core::verify::VerifyOptions::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    serde_json::to_string(&report).map_err(|e| e.to_string())
+}
+
 /// Quit the whole process (the embedded /dyn agent stops with it). Wired to the
 /// window's "Salir" button so there is always an in-window way to exit, not only
 /// the tray menu (which may be invisible on some desktops).
@@ -282,7 +302,7 @@ pub fn run() {
         // Closing the window quits the whole process (the embedded /dyn agent
         // stops with it). The tray "Salir" item and the in-window "Salir" button
         // both call quit_app for the same effect.
-        .invoke_handler(tauri::generate_handler![card_info, sign_pdf, quit_app, save_file, open_pdf])
+        .invoke_handler(tauri::generate_handler![card_info, sign_pdf, quit_app, save_file, open_pdf, verify_pdf])
         .run(tauri::generate_context!())
         .expect("error while running Firma CR tauri application");
 }

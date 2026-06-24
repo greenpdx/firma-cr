@@ -210,8 +210,8 @@ const CFG_KEY = "firma-cr.config";
 /// `loadConfig()` runs — it's read inside it, so it must be initialized first.
 const BCCR_TSA_URL = "https://tsa.firmadigital.go.cr/tsa";
 let cfg = loadConfig();
-function loadConfig(): { method: Method; module: string; p12: string; tsaEnabled: boolean; tsa: string } {
-  const defaults = { method: "pkcs11" as Method, module: "", p12: "", tsaEnabled: false, tsa: BCCR_TSA_URL };
+function loadConfig(): { method: Method; module: string; p12: string; tsaEnabled: boolean; tsa: string; caPem: string } {
+  const defaults = { method: "pkcs11" as Method, module: "", p12: "", tsaEnabled: false, tsa: BCCR_TSA_URL, caPem: "" };
   try {
     const raw = localStorage.getItem(CFG_KEY);
     if (raw) return { ...defaults, ...JSON.parse(raw) };
@@ -232,9 +232,35 @@ $("btn-config").addEventListener("click", () => {
   $<HTMLInputElement>("cfg-p12").value = cfg.p12;
   $<HTMLInputElement>("cfg-tsa-enable").checked = cfg.tsaEnabled;
   $<HTMLInputElement>("cfg-tsa-url").value = cfg.tsa;
+  pendingCa = null;
+  $<HTMLInputElement>("cfg-ca").value = caLabel(cfg.caPem);
   toggleMethodGroups();
   dialog.showModal();
 });
+
+// CA chain (BCCR) used to verify signatures — loaded as PEM text and stored
+// locally (it is a public certificate). A file <input> + FileReader works in
+// both the browser and the Tauri webview (no path-reading needed).
+const caInput = document.createElement("input");
+caInput.type = "file";
+caInput.accept = ".pem,.crt,.cer,.der,application/x-pem-file,application/pkix-cert";
+caInput.style.cssText = "position:fixed;left:-9999px;opacity:0;width:1px;height:1px";
+document.body.appendChild(caInput);
+let pendingCa: string | null = null; // null = unchanged while the dialog is open
+function caLabel(pem: string): string {
+  if (!pem) return "(ninguna cargada)";
+  const certs = (pem.match(/-----BEGIN CERTIFICATE-----/g) || []).length;
+  return `cargada (${certs} cert${certs === 1 ? "" : "s"}, ${pem.length} B)`;
+}
+caInput.addEventListener("change", () => {
+  const f = caInput.files?.[0];
+  caInput.value = "";
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => { pendingCa = String(rd.result || ""); $<HTMLInputElement>("cfg-ca").value = caLabel(pendingCa); log("CA cargada:", f.name); };
+  rd.readAsText(f);
+});
+$("cfg-pick-ca").addEventListener("click", () => caInput.click());
 document.querySelectorAll('input[name="method"]').forEach((el) => el.addEventListener("change", toggleMethodGroups));
 $("cfg-pick-module").addEventListener("click", async () => {
   if (!IS_TAURI) return;
@@ -252,6 +278,7 @@ $("cfg-save").addEventListener("click", () => {
   cfg.p12 = $<HTMLInputElement>("cfg-p12").value;
   cfg.tsaEnabled = $<HTMLInputElement>("cfg-tsa-enable").checked;
   cfg.tsa = $<HTMLInputElement>("cfg-tsa-url").value.trim();
+  if (pendingCa !== null) cfg.caPem = pendingCa;
   localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
   dialog.close();
 });
@@ -287,7 +314,62 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(
 type Status = "pending" | "signed" | "error";
 interface QItem { file: File; name: string; status: Status; error?: string; placement?: Placement | null; }
 let queue: QItem[] = [];
-let signedDocs: { name: string; blob: Blob; signer: string }[] = [];
+let signedDocs: { name: string; blob: Blob; signer?: string }[] = [];
+
+// "Cargar…" in Firmados: load an external signed PDF into the list to verify it.
+const verifyInput = document.createElement("input");
+verifyInput.type = "file";
+verifyInput.accept = ".pdf,application/pdf";
+verifyInput.multiple = true;
+verifyInput.style.cssText = "position:fixed;left:-9999px;opacity:0;width:1px;height:1px";
+document.body.appendChild(verifyInput);
+verifyInput.addEventListener("change", () => {
+  const picked = Array.from(verifyInput.files ?? []);
+  verifyInput.value = "";
+  for (const f of picked) signedDocs.unshift({ name: f.name, blob: f });
+  if (picked.length) { log("cargado para verificar:", picked.map((f) => f.name).join(", ")); renderSigned(); }
+});
+$("btn-load-verify").addEventListener("click", () => { verifyInput.value = ""; verifyInput.click(); });
+
+// Render a VerifyReport (from the Tauri command / /dyn route) as a readable block.
+function formatVerdict(name: string, rep: any): string {
+  const L: string[] = [`${rep.ok ? "✔ FIRMA VÁLIDA" : "✘ FIRMA NO VÁLIDA"} — ${name}`];
+  if (rep.signer_subject) {
+    const cn = String(rep.signer_subject).match(/CN=([^,]+)/i)?.[1] || rep.signer_subject;
+    L.push(`  firmante: ${cn}`);
+  }
+  if (rep.signing_time) L.push(`  fecha de firma: ${rep.signing_time}`);
+  if (rep.has_timestamp) L.push(`  sello de tiempo: ${rep.timestamp?.ok ? "✔" : "✘"}${rep.timestamp?.gen_time ? " · " + rep.timestamp.gen_time : ""}`);
+  if (rep.revocation) L.push(`  revocación: ${rep.revocation.ok ? "✔" : "✘"}`);
+  for (const w of (rep.warnings ?? [])) L.push(`  ⚠ ${w}`);
+  return L.join("\n");
+}
+
+async function verifyDoc(d: { name: string; blob: Blob }): Promise<void> {
+  const res = $("result");
+  if (!cfg.caPem) { res.textContent = "Para verificar, carga la cadena CA del BCCR en Configuración (⚙)."; return; }
+  if (!d.name.toLowerCase().endsWith(".pdf")) { res.textContent = "Por ahora solo se verifican PDF (PAdES)."; return; }
+  res.textContent = `verificando ${d.name}…`;
+  try {
+    const pdfB64 = await blobToB64(d.blob);
+    let json: string;
+    if (IS_TAURI) {
+      json = await invoke<string>("verify_pdf", { dataB64: pdfB64, caPem: cfg.caPem });
+    } else {
+      const r = await fetchT(`${DYN}/dyn/verify_pdf`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pdf_b64: pdfB64, ca_pem: cfg.caPem }),
+      });
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      json = await r.text();
+    }
+    res.textContent = formatVerdict(d.name, JSON.parse(json));
+  } catch (e) {
+    res.textContent = `ERROR al verificar ${d.name}: ${e}`;
+    console.error("[firma-cr] verify ✗", d.name, e);
+  }
+}
 
 const fileInput = document.createElement("input");
 fileInput.type = "file";
@@ -385,10 +467,13 @@ function renderSigned(): void {
     const view = document.createElement("button");
     view.className = "small"; view.textContent = "Ver";
     view.addEventListener("click", () => openDoc(d.name, d.blob, d.signer));
+    const vf = document.createElement("button");
+    vf.className = "small"; vf.textContent = "Verificar";
+    vf.addEventListener("click", () => void verifyDoc(d));
     const dl = document.createElement("button");
     dl.className = "small"; dl.textContent = "⬇"; dl.title = "Descargar";
     dl.addEventListener("click", () => void saveBlob(d.name, d.blob));
-    li.append(view, dl);
+    li.append(view, vf, dl);
     ul.appendChild(li);
   });
 }
