@@ -126,6 +126,32 @@ note it — that's a regression we need to know about.)
 
 ---
 
+## E. GUI controls (menu + Documento viewer)
+
+Checks the recently-changed GUI chrome. Do these in the **GUI** with a signed PDF
+open in the **Documento** tab (e.g. the one from step B). No card needed except
+where a step signs.
+
+- **E1 — ☰ menu (Exit):** click the **☰** button (top-left). A menu opens with
+  **Configuración** and **Salir**. *Configuración* opens the settings dialog;
+  *Salir* quits the app. Clicking elsewhere / pressing Esc closes the menu.
+  **PASS if** the menu opens and **Salir** quits.
+- **E2 — Documento viewer (no edit tools):** the PDF shows in our own viewer.
+  **PASS if** it **scrolls** through all pages, **zoom** (− / + / **Ajustar**)
+  works, the page indicator updates, and there are **no editing/annotation
+  tools** anywhere.
+- **E3 — Guardar (Save):** click **Guardar** → a native **Save** dialog appears;
+  pick a path. **PASS if** the file is written there (open it to confirm).
+- **E4 — Imprimir (Print):** click **Imprimir**. **PASS if** the PDF opens in the
+  system's default PDF app (where you can print).
+- **E5 — Cerrar (Close):** click **Cerrar**. **PASS if** the viewer clears back to
+  the empty state and the app keeps running (it must **not** quit).
+
+> If a button does nothing, open DevTools (F12) → Console and paste what shows
+> when you click it — the app logs `[firma-cr] click: …` and any `‼ error:`.
+
+---
+
 ## Results — please fill in and send back
 
 | Step | What | PASS / FAIL | Notes (paste output on FAIL) |
@@ -137,6 +163,11 @@ note it — that's a regression we need to know about.)
 | C3   | CLI: XAdES verifies in **our** tool **and** another tool | | |
 | C4   | tampered PDF is **rejected** | | |
 | D    | three signs in one session all succeed | | |
+| E1   | ☰ menu opens; **Salir** quits | | |
+| E2   | Documento viewer: scroll + zoom, **no edit tools** | | |
+| E3   | **Guardar** writes via the native Save dialog | | |
+| E4   | **Imprimir** opens the system PDF app | | |
+| E5   | **Cerrar** clears the view (does not quit) | | |
 
 Also send:
 - The reader model and `pcsc_scan` ATR line.
