@@ -117,13 +117,14 @@
         </div>
         <fieldset>
           <legend>Verificación</legend>
-          <label>Cadena CA del BCCR (.pem) — para verificar firmas
+          <label>Cadena CA del BCCR (.pem / .der) — para verificar firmas
             <div class="row">
-              <input id="cfg-ca" type="text" placeholder="(ninguna cargada)" readonly />
+              <input id="cfg-ca" type="text" placeholder="predeterminada (BCCR)" readonly />
               <button type="button" id="cfg-pick-ca">Cargar…</button>
+              <button type="button" id="cfg-reset-ca">Predeterminada</button>
             </div>
           </label>
-          <p class="hint">Raíz/cadena nacional del BCCR. Necesaria para «Verificar» en Firmados. Se guarda localmente en el navegador (es un certificado público).</p>
+          <p class="hint">La app incluye la cadena nacional del BCCR por defecto. Puedes cargar la tuya (sustituye a la predeterminada) o volver a la predeterminada. Se guarda localmente (es un certificado público).</p>
         </fieldset>
         <fieldset>
           <legend>Sellado de tiempo (TSA)</legend>
