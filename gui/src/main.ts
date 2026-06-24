@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as tauriOpen, save as tauriSave } from "@tauri-apps/plugin-dialog";
 import { placeSignature, type Placement } from "./place";
 import { renderPdf, pdfPageCount, type PdfViewer } from "./pdfview";
+import bundledCa from "./assets/bccr-chain.pem?raw";
 
 // Tauri desktop shell vs. plain web app. In the browser, card ops go to the
 // local /dyn agent (SCManager-style HTTP backend) and files use upload/download.
@@ -219,6 +220,17 @@ function loadConfig(): { method: Method; module: string; p12: string; tsaEnabled
   return defaults;
 }
 const moduleArg = () => (cfg.module.trim() === "" ? null : cfg.module.trim());
+
+// CA used to verify: the user's loaded override if set, else the CA chain
+// bundled with the app (src/assets/bccr-chain.pem). The bundle is only treated
+// as a default when it actually carries a certificate (the shipped placeholder
+// does not), so a missing default falls back to the "load a CA" prompt.
+const BUNDLED_CA_HAS_CERT = bundledCa.includes("-----BEGIN CERTIFICATE-----");
+function getCa(): string {
+  const override = cfg.caPem.trim();
+  if (override) return override;
+  return BUNDLED_CA_HAS_CERT ? bundledCa : "";
+}
 const dialog = $<HTMLDialogElement>("config-dialog");
 const selectedMethod = () => (document.querySelector('input[name="method"]:checked') as HTMLInputElement).value as Method;
 function toggleMethodGroups(): void {
@@ -247,10 +259,13 @@ caInput.accept = ".pem,.crt,.cer,.der,application/x-pem-file,application/pkix-ce
 caInput.style.cssText = "position:fixed;left:-9999px;opacity:0;width:1px;height:1px";
 document.body.appendChild(caInput);
 let pendingCa: string | null = null; // null = unchanged while the dialog is open
-function caLabel(pem: string): string {
-  if (!pem) return "(ninguna cargada)";
-  const certs = (pem.match(/-----BEGIN CERTIFICATE-----/g) || []).length;
-  return `cargada (${certs} cert${certs === 1 ? "" : "s"}, ${pem.length} B)`;
+// `override` is the user's loaded CA ("" = none → use the bundled default).
+function caLabel(override: string): string {
+  if (override) {
+    const certs = (override.match(/-----BEGIN CERTIFICATE-----/g) || []).length;
+    return `propia (${certs} cert${certs === 1 ? "" : "s"})`;
+  }
+  return BUNDLED_CA_HAS_CERT ? "predeterminada (BCCR, incluida en la app)" : "(ninguna — carga una)";
 }
 // Normalize a CA file (PEM *or* DER) to clean PEM text. Reading a DER/binary
 // cert as text injects NUL bytes that break PEM parsing — so we read bytes:
@@ -278,6 +293,7 @@ caInput.addEventListener("change", () => {
   rd.readAsArrayBuffer(f);
 });
 $("cfg-pick-ca").addEventListener("click", () => caInput.click());
+$("cfg-reset-ca").addEventListener("click", () => { pendingCa = ""; $<HTMLInputElement>("cfg-ca").value = caLabel(""); });
 document.querySelectorAll('input[name="method"]').forEach((el) => el.addEventListener("change", toggleMethodGroups));
 $("cfg-pick-module").addEventListener("click", async () => {
   if (!IS_TAURI) return;
@@ -375,11 +391,12 @@ async function pdfInfoLine(d: SignedDoc): Promise<string> {
 // Call the verifier (Tauri command or /dyn route) and return the report JSON.
 async function callVerify(blob: Blob): Promise<string> {
   const pdfB64 = await blobToB64(blob);
-  if (IS_TAURI) return await invoke<string>("verify_pdf", { dataB64: pdfB64, caPem: cfg.caPem });
+  const caPem = getCa();
+  if (IS_TAURI) return await invoke<string>("verify_pdf", { dataB64: pdfB64, caPem });
   const r = await fetchT(`${DYN}/dyn/verify_pdf`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pdf_b64: pdfB64, ca_pem: cfg.caPem }),
+    body: JSON.stringify({ pdf_b64: pdfB64, ca_pem: caPem }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return await r.text();
@@ -405,7 +422,7 @@ async function verifyInto(d: SignedDoc, detail: HTMLElement): Promise<void> {
   if (!detail.hidden && detail.dataset.done === "1") { detail.hidden = true; return; }
   detail.hidden = false;
   if (!d.name.toLowerCase().endsWith(".pdf")) { detail.innerHTML = `<div class="warn">Por ahora solo se verifican PDF (PAdES).</div>`; return; }
-  if (!cfg.caPem) { detail.innerHTML = `<div class="warn">⚙ Carga la cadena CA del BCCR en Configuración para verificar.</div>`; return; }
+  if (!getCa()) { detail.innerHTML = `<div class="warn">⚙ No hay cadena CA del BCCR (ni predeterminada ni cargada). Cárgala en Configuración para verificar.</div>`; return; }
   detail.textContent = "verificando…";
   try {
     detail.innerHTML = renderVerdictHtml(JSON.parse(await callVerify(d.blob)));
