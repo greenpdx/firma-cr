@@ -59,18 +59,43 @@ pub fn build_and_verify_chain<'a>(
             }
         }
 
-        // Find an issuer in intermediates or roots.
-        let issuer = find_issuer(current, intermediates)
-            .or_else(|| find_issuer(current, roots))
-            .ok_or_else(|| {
-                Error::CertParse(format!(
+        // Candidate issuers: every cert (intermediates first, then roots) whose
+        // subject matches `current`'s issuer DN. Multiple CAs can share a subject
+        // DN with different keys (re-keyed / cross-signed CAs — BCCR has these),
+        // so try each and keep the one whose key ACTUALLY signed `current`.
+        let want = &current.parsed.tbs_certificate.issuer;
+        let mut issuer: Option<&SignerCert> = None;
+        let mut saw_candidate = false;
+        let mut last_err: Option<Error> = None;
+        for c in intermediates.iter().chain(roots.iter()).copied() {
+            if &c.parsed.tbs_certificate.subject != want {
+                continue;
+            }
+            saw_candidate = true;
+            match verify_signed_by(current, c) {
+                Ok(()) => {
+                    issuer = Some(c);
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let issuer = match issuer {
+            Some(c) => c,
+            None if saw_candidate => {
+                return Err(last_err.unwrap_or_else(|| {
+                    Error::CertParse(format!("no issuer verified {:?}", current.subject_string()))
+                }));
+            }
+            None => {
+                return Err(Error::CertParse(format!(
                     "no issuer cert found for subject {:?}",
                     current.subject_string()
-                ))
-            })?;
+                )));
+            }
+        };
 
-        verify_signed_by(current, issuer)?;
-        // The issuer signed `current`, so it must be a valid CA per RFC 5280.
+        // `issuer` verified `current` above; it must be a valid CA per RFC 5280.
         enforce_ca_constraints(issuer, intermediate_cas_below)?;
         chain.push(issuer);
 
@@ -92,14 +117,6 @@ pub fn build_and_verify_chain<'a>(
 /// True if subject == issuer (covers root certs and orphan ICAs).
 fn is_self_issued(c: &SignerCert) -> bool {
     c.parsed.tbs_certificate.subject == c.parsed.tbs_certificate.issuer
-}
-
-/// Find a cert whose subject matches `child.issuer`.
-fn find_issuer<'a>(child: &SignerCert, set: &[&'a SignerCert]) -> Option<&'a SignerCert> {
-    let issuer = &child.parsed.tbs_certificate.issuer;
-    set.iter()
-        .find(|c| &c.parsed.tbs_certificate.subject == issuer)
-        .copied()
 }
 
 /// Enforce RFC 5280 CA constraints on a cert acting as an issuer (it signed the
