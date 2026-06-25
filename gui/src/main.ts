@@ -371,7 +371,15 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(
 type Status = "pending" | "signed" | "error";
 interface QItem { file: File; name: string; status: Status; error?: string; placement?: Placement | null; }
 let queue: QItem[] = [];
-type SignedDoc = { name: string; blob: Blob; signer?: string; info?: string };
+type SignedDoc = { name: string; blob: Blob; signer?: string; info?: string; verdict?: any };
+
+// Prettify the report's signing_time (a Rust GeneralizedTime Debug string).
+function fmtSigTime(s: string): string {
+  const m = s.match(/year:\s*(\d+).*?month:\s*(\d+).*?day:\s*(\d+).*?hour:\s*(\d+).*?minutes:\s*(\d+)(?:.*?seconds:\s*(\d+))?/s);
+  if (!m) return s;
+  const p = (n: string | undefined) => (n ?? "0").padStart(2, "0");
+  return `${m[1]}-${p(m[2])}-${p(m[3])} ${p(m[4])}:${p(m[5])}:${p(m[6])} UTC`;
+}
 let signedDocs: SignedDoc[] = [];
 
 // "Cargar…" in Firmados: load an external signed PDF into the list to verify it.
@@ -432,27 +440,64 @@ function renderVerdictHtml(rep: any): string {
     `<div><b>firmante:</b> ${esc(cn)}</div>`,
   ];
   if (rep.signer_subject) rows.push(`<div class="muted">${esc(rep.signer_subject)}</div>`);
-  if (rep.signing_time) rows.push(`<div><b>fecha de firma:</b> ${esc(rep.signing_time)}</div>`);
+  if (rep.signing_time) rows.push(`<div><b>fecha de firma:</b> ${esc(fmtSigTime(rep.signing_time))}</div>`);
   rows.push(`<div><b>sello de tiempo:</b> ${rep.has_timestamp ? (rep.timestamp?.ok ? "✔" : "✘") + (rep.timestamp?.gen_time ? " · " + esc(rep.timestamp.gen_time) : "") : "—"}</div>`);
   if (rep.revocation) rows.push(`<div><b>revocación:</b> ${rep.revocation.ok ? "✔" : "✘"}</div>`);
   for (const w of (rep.warnings ?? [])) rows.push(`<div class="warn">⚠ ${esc(String(w))}</div>`);
   return rows.join("");
 }
 
-// Verify a row's PDF and render the verdict inline in its detail panel; a second
-// click on Verificar collapses it.
+// Verify a PDF once and cache the report on the doc (shared by the auto hover
+// info and the Verificar panel). Non-PDFs / errors are cached as a stub.
+async function ensureVerdict(d: SignedDoc): Promise<any> {
+  if (d.verdict) return d.verdict;
+  if (!d.name.toLowerCase().endsWith(".pdf")) {
+    d.verdict = { error: "solo se verifican PDF (PAdES)" };
+    return d.verdict;
+  }
+  try {
+    d.verdict = JSON.parse(await callVerify(d.blob));
+  } catch (e) {
+    d.verdict = { error: String(e) };
+    console.error("[firma-cr] verify ✗", d.name, e);
+  }
+  return d.verdict;
+}
+
+// One-line status (✔/✘ + PDF info) shown under the file name.
+function sinfoText(d: SignedDoc): string {
+  const pdf = d.info ?? "analizando…";
+  const v = d.verdict;
+  if (!v) return `… ${pdf}`;
+  if (v.error) return `✘ ${pdf}`;
+  return `${v.ok ? "✔" : "✘"} ${pdf}`;
+}
+
+// Multi-line quick info for the row's hover tooltip: PDF + crypto/signature.
+function quickInfoText(d: SignedDoc): string {
+  const L = [d.name, d.info ?? "analizando PDF…"];
+  const v = d.verdict;
+  if (!v) { L.push("verificando firma…"); return L.join("\n"); }
+  if (v.error) { L.push(`✘ ${v.error}`); return L.join("\n"); }
+  L.push(v.ok ? "✔ FIRMA VÁLIDA" : "✘ FIRMA NO VÁLIDA");
+  if (v.signer_subject) L.push(`firmante: ${String(v.signer_subject).match(/CN=([^,]+)/i)?.[1] || v.signer_subject}`);
+  if (v.signing_time) L.push(`fecha: ${fmtSigTime(v.signing_time)}`);
+  L.push(`sello de tiempo: ${v.has_timestamp ? (v.timestamp?.ok ? "✔" : "✘") : "—"}`);
+  if (v.revocation) L.push(`revocación: ${v.revocation.ok ? "✔" : "✘"}`);
+  for (const w of (v.warnings ?? [])) L.push(`⚠ ${w}`);
+  return L.join("\n");
+}
+
+// Verify a row and render the verdict inline; a second click collapses it.
 async function verifyInto(d: SignedDoc, detail: HTMLElement): Promise<void> {
   if (!detail.hidden && detail.dataset.done === "1") { detail.hidden = true; return; }
   detail.hidden = false;
-  if (!d.name.toLowerCase().endsWith(".pdf")) { detail.innerHTML = `<div class="warn">Por ahora solo se verifican PDF (PAdES).</div>`; return; }
   detail.textContent = "verificando…";
-  try {
-    detail.innerHTML = renderVerdictHtml(JSON.parse(await callVerify(d.blob)));
-    detail.dataset.done = "1";
-  } catch (e) {
-    detail.innerHTML = `<div class="verdict bad">ERROR</div><div class="muted">${esc(String(e))}</div>`;
-    console.error("[firma-cr] verify ✗", d.name, e);
-  }
+  const v = await ensureVerdict(d);
+  detail.innerHTML = v && v.ok !== undefined
+    ? renderVerdictHtml(v)
+    : `<div class="verdict bad">No verificado</div><div class="muted">${esc(v?.error ?? "?")}</div>`;
+  detail.dataset.done = "1";
 }
 
 const fileInput = document.createElement("input");
@@ -562,11 +607,16 @@ function renderSigned(): void {
     dl.addEventListener("click", () => void saveBlob(d.name, d.blob));
     row.append(view, vf, dl);
 
-    // Auto PDF-info line (cached on the doc after first compute).
+    // Status line under the name.
     const info = document.createElement("div");
     info.className = "sinfo";
-    if (d.info) info.textContent = d.info;
-    else { info.textContent = "analizando…"; void pdfInfoLine(d).then((s) => { d.info = s; info.textContent = s; }); }
+
+    // Hover tooltip (PDF + crypto) + the status line; both refresh as the async
+    // PDF analysis and the auto-verify complete. Results are cached on the doc.
+    const refresh = () => { info.textContent = sinfoText(d); li.title = quickInfoText(d); };
+    refresh();
+    if (d.info === undefined) void pdfInfoLine(d).then((s) => { d.info = s; refresh(); });
+    if (d.verdict === undefined) void ensureVerdict(d).then(() => refresh());
 
     // Inline signature verdict, toggled by Verificar.
     const detail = document.createElement("div");
