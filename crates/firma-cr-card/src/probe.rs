@@ -83,6 +83,13 @@ pub struct EfBytes {
     pub bytes_len: usize,
 }
 
+/// A certificate read straight from an EF.CDF path (raw DER), no PIN.
+#[derive(Debug, Clone)]
+pub struct DiscoveredCert {
+    pub fid_hex: String,
+    pub der: Vec<u8>,
+}
+
 #[derive(Serialize)]
 pub struct ParsedApp {
     pub aid_hex: String,
@@ -578,6 +585,34 @@ impl Prober {
             }
         }
         Ok(None)
+    }
+
+    /// Read **every** 2-byte cert path discovered in EF.CDF as raw DER.
+    /// Call after [`run_unauthenticated`](Self::run_unauthenticated) (which
+    /// selects the app and populates the cert paths). No PIN — PKCS#15 cert
+    /// EFs are public-readable. Generalises [`read_first_discovered_cert`].
+    pub fn read_all_certificates(&mut self) -> Result<Vec<DiscoveredCert>> {
+        let paths: Vec<Vec<u8>> = self
+            .report
+            .discovered_cert_paths
+            .iter()
+            .filter_map(|s| hex::decode(s).ok())
+            .collect();
+        let mut out = Vec::new();
+        for p in paths {
+            if p.len() != 2 {
+                log::debug!("probe: skipping non-2-byte cert path {}", hex::encode(&p));
+                continue;
+            }
+            let fid = ((p[0] as u16) << 8) | p[1] as u16;
+            if self.select_fid(fid, 0x02)? == 0x9000 {
+                if let Some(der) = self.read_binary_all(&format!("Cert@{:04X}", fid))? {
+                    log::info!("probe: cert read OK from {:04X} ({} bytes)", fid, der.len());
+                    out.push(DiscoveredCert { fid_hex: format!("{:04X}", fid), der });
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub fn finalize(mut self) -> ProbeReport {
